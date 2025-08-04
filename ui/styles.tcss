@@ -1,0 +1,138 @@
+/* MLGaze Viewer TUI Styles */
+
+/* Main Grid Layout */
+.grid-container {
+    layout: grid;
+    grid-size: 2;
+    grid-columns: 1fr 1fr;
+    grid-gutter: 2;
+    margin: 1;
+}
+
+.left-column {
+    padding: 1;
+    border: solid $primary 50%;
+}
+
+.right-column {
+    padding: 1;
+    border: solid $primary 50%;
+}
+
+/* Section Styling */
+.section-title {
+    text-style: bold;
+    margin-bottom: 1;
+    color: $primary;
+    border-bottom: solid $primary;
+    padding-bottom: 1;
+}
+
+.section-content {
+    padding: 1 2;
+    margin-bottom: 1;
+}
+
+/* Input and Form Controls */
+Input {
+    margin-bottom: 1;
+    width: 100%;
+    max-width: 40;
+    min-width: 15;
+}
+
+/* Visual feedback for input validation */
+Input.valid-path {
+    border: solid $success;
+}
+
+Input.invalid-path {
+    border: solid $error;
+}
+
+Input.warning-path {
+    border: solid $warning;
+}
+
+Button {
+    margin: 0 1;
+    min-width: 15;
+}
+
+/* Horizontal containers for input + button */
+Horizontal {
+    height: auto;
+    align: left top;
+}
+
+Horizontal > Input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+Horizontal > Button {
+    width: auto;
+    margin: 0;
+}
+
+/* Containers */
+Container {
+    height: auto;
+}
+
+/* Action buttons */
+.button-container {
+    margin-top: 2;
+    text-align: center;
+    padding: 1;
+}
+
+/* Directory Browser Styles */
+DirectoryBrowserScreen {
+    background: $surface;
+}
+
+.directory-container {
+    width: 80%;
+    height: 80%;
+    margin: 2;
+    padding: 1;
+    border: solid $primary;
+}
+
+.nav-controls {
+    margin-bottom: 1;
+    padding: 1;
+    border-bottom: solid $primary 50%;
+}
+
+.nav-controls Button {
+    margin-right: 1;
+    min-width: 8;
+}
+
+.browser-buttons {
+    margin-top: 1;
+    text-align: center;
+}
+
+.current-path {
+    margin-bottom: 1;
+    text-style: bold;
+    color: $primary;
+}
+
+#current_path_display {
+    text-style: italic;
+    color: $text 70%;
+}
+
+/* Checkbox and Radio Button Styling */
+Checkbox {
+    margin-bottom: 1;
+}
+
+RadioSet {
+    margin-bottom: 1;
+}
+

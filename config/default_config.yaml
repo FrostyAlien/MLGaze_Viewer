@@ -1,0 +1,51 @@
+# MLGaze Viewer Configuration
+# Default settings for Magic Leap 2 gaze visualization
+
+temporal:
+  # Visualization mode: cumulative, sliding, static
+  mode: "cumulative"
+  
+  # History window (choose one)
+  history_frames: 500      # Show last N frames
+  history_seconds: 30.0    # Or show last N seconds
+  
+  # Trail effects
+  fade_duration: 5.0       # Seconds for opacity fade
+  trail_enabled: true      # Show gaze trails
+
+analytics:
+  # Head pose metrics
+  head_metrics:
+    velocity: true           # Linear velocity (m/s)
+    angular_velocity: true   # Rotational velocity (°/s)  
+    stability: true          # Position RMS stability (mm)
+  
+  # Eye gaze metrics
+  gaze_metrics:
+    saccade_velocity: true   # Peak saccade velocity (°/s)
+    fixation_duration: true  # Fixation duration analysis (ms)
+    fixation_precision: true # Fixation RMS precision (°)
+  
+  # Combined head-gaze coordination
+  coordination:
+    vor_gain: true           # Vestibulo-ocular reflex gain
+    head_gaze_correlation: true # Movement correlation coefficient
+  
+  # Analysis parameters
+  fixation_threshold: 1.5    # Degrees for fixation detection
+  saccade_threshold: 30.0    # °/s minimum for saccade detection
+  analysis_window: 1.0       # Seconds for moving window analysis
+
+visualization:
+  # Basic display options
+  show_trajectories: true    # Camera and gaze paths
+  show_point_cloud: true     # Static gaze point cloud
+  show_analytics_plots: true # Time-series metric plots
+  
+  # Visual styling
+  color_by_state: true       # Color by gaze state
+  color_by_metrics: false    # Color by computed metrics
+  
+  # Performance
+  max_points_displayed: 5000 # Limit for performance
+  update_interval: 0.1       # Seconds between updates
