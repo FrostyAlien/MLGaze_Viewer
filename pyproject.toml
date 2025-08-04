@@ -1,0 +1,11 @@
+[project]
+name = "mlgaze-viewer"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3.2",
+    "opencv-python>=4.11.0.86",
+    "pandas>=2.3.1",
+    "rerun-sdk>=0.24.0",
+]
