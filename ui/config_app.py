@@ -26,12 +26,17 @@ class VisualizationConfig:
     metadata_csv_file: str = ""  # Will be auto-detected or selected
     frames_directory: str = ""  # Will be auto-detected or selected
     
-    # Temporal settings
-    temporal_mode: str = "all"  # "all", "recent_frames", "recent_seconds"
-    recent_frames: int = 500
-    recent_seconds: float = 30.0
+    # Visualization settings
     enable_fade_trail: bool = True
     fade_duration: float = 5.0
+    
+    # Sliding window settings
+    enable_sliding_window: bool = False
+    sliding_window_duration: float = 10.0  # seconds
+    sliding_window_update_rate: float = 0.5  # seconds between updates
+    sliding_window_3d_gaze: bool = True  # Apply to 3D gaze points
+    sliding_window_3d_trajectory: bool = True  # Apply to 3D trajectories
+    sliding_window_camera: bool = True  # Apply to camera positions
     
     # Visualization toggles
     show_point_cloud: bool = True
@@ -39,6 +44,7 @@ class VisualizationConfig:
     show_camera_trajectory: bool = True
     color_by_gaze_state: bool = True
     test_y_flip: bool = False
+    flip_camera_frustum: bool = True  # Flip camera to match transformed coordinate system
 
 
 class DirectoryBrowserScreen(ModalScreen[str]):
@@ -277,30 +283,9 @@ class MLGazeConfigApp(App):
                             )
                             yield Button("Browse", id="browse_directory")
                     
-                    # Temporal Settings Section
-                    yield Static("Temporal Display", classes="section-title")
+                    # Trail Settings Section
+                    yield Static("Trail Effects", classes="section-title")
                     with Container(classes="section-content"):
-                        yield RadioSet(
-                            RadioButton("Show All Points", value=True, id="mode_all"),
-                            RadioButton("Recent Frames", id="mode_frames"),
-                            RadioButton("Recent Seconds", id="mode_seconds"),
-                            id="temporal_mode"
-                        )
-                        
-                        yield Static("Recent Frames:")
-                        yield Input(
-                            placeholder="500", 
-                            value="500", 
-                            id="recent_frames"
-                        )
-                        
-                        yield Static("Recent Seconds:")
-                        yield Input(
-                            placeholder="30.0", 
-                            value="30.0", 
-                            id="recent_seconds"
-                        )
-                        
                         yield Checkbox("Enable Trail Fade", value=True, id="fade_trail")
                         
                         yield Static("Fade Duration (seconds):")
@@ -309,6 +294,29 @@ class MLGazeConfigApp(App):
                             value="5.0", 
                             id="fade_duration"
                         )
+                    
+                    # Sliding Window Section
+                    yield Static("Sliding Window (3D only)", classes="section-title")
+                    with Container(classes="section-content"):
+                        yield Checkbox("Enable Sliding Window", value=False, id="sliding_window")
+                        
+                        yield Static("Window Duration (seconds):")
+                        yield Input(
+                            placeholder="10.0", 
+                            value="10.0", 
+                            id="window_duration"
+                        )
+                        
+                        yield Static("Update Rate (seconds):")
+                        yield Input(
+                            placeholder="0.5", 
+                            value="0.5", 
+                            id="update_rate"
+                        )
+                        
+                        yield Checkbox("Apply to 3D Gaze Points", value=True, id="window_gaze")
+                        yield Checkbox("Apply to 3D Trajectories", value=True, id="window_trajectory")
+                        yield Checkbox("Apply to Camera Position", value=True, id="window_camera")
                 
                 # Right Column - Visualization Settings
                 with Container(classes="right-column"):
@@ -319,6 +327,7 @@ class MLGazeConfigApp(App):
                         yield Checkbox("Show Camera Path", value=True, id="camera_path")
                         yield Checkbox("Color by Gaze State", value=True, id="color_by_state")
                         yield Checkbox("Test Y-Flip", value=False, id="y_flip")
+                        yield Checkbox("Flip Camera Frustum", value=True, id="flip_camera")
             
             # Action Buttons (full width, outside grid)
             with Container(classes="button-container"):
@@ -335,15 +344,6 @@ class MLGazeConfigApp(App):
         # Set focus to first input field
         self.query_one("#input_directory", Input).focus()
     
-    @on(RadioSet.Changed, "#temporal_mode")
-    def temporal_mode_changed(self, event: RadioSet.Changed) -> None:
-        """Handle temporal mode selection."""
-        if event.pressed.id == "mode_all":
-            self.config.temporal_mode = "all"
-        elif event.pressed.id == "mode_frames":
-            self.config.temporal_mode = "recent_frames"
-        elif event.pressed.id == "mode_seconds":
-            self.config.temporal_mode = "recent_seconds"
     
     @on(Checkbox.Changed)
     def checkbox_changed(self, event: Checkbox.Changed) -> None:
@@ -363,6 +363,20 @@ class MLGazeConfigApp(App):
             self.config.color_by_gaze_state = value
         elif checkbox_id == "y_flip":
             self.config.test_y_flip = value
+        elif checkbox_id == "flip_camera":
+            self.config.flip_camera_frustum = value
+        elif checkbox_id == "sliding_window":
+            self.config.enable_sliding_window = value
+            if value:
+                self.show_success("Sliding window enabled for 3D data")
+            else:
+                self.show_success("Sliding window disabled")
+        elif checkbox_id == "window_gaze":
+            self.config.sliding_window_3d_gaze = value
+        elif checkbox_id == "window_trajectory":
+            self.config.sliding_window_3d_trajectory = value
+        elif checkbox_id == "window_camera":
+            self.config.sliding_window_camera = value
     
     @on(Input.Changed)
     def input_changed(self, event: Input.Changed) -> None:
@@ -377,30 +391,6 @@ class MLGazeConfigApp(App):
                 if value and len(value) > 2:  # Avoid validating every keystroke
                     self.validate_directory(value)
                     
-            elif input_id == "recent_frames":
-                if value:
-                    frames = int(value)
-                    if frames < 1:
-                        self.show_warning("Recent frames must be at least 1")
-                    elif frames > 10000:
-                        self.show_warning("Recent frames value is very high - may impact performance")
-                    else:
-                        self.config.recent_frames = frames
-                else:
-                    self.config.recent_frames = 500
-                    
-            elif input_id == "recent_seconds":
-                if value:
-                    seconds = float(value)
-                    if seconds < 0.1:
-                        self.show_warning("Recent seconds must be at least 0.1")
-                    elif seconds > 300:
-                        self.show_warning("Recent seconds value is very high - may impact performance")
-                    else:
-                        self.config.recent_seconds = seconds
-                else:
-                    self.config.recent_seconds = 30.0
-                    
             elif input_id == "fade_duration":
                 if value:
                     duration = float(value)
@@ -413,10 +403,32 @@ class MLGazeConfigApp(App):
                 else:
                     self.config.fade_duration = 5.0
                     
+            elif input_id == "window_duration":
+                if value:
+                    duration = float(value)
+                    if duration < 1.0:
+                        self.show_warning("Window duration must be at least 1 second")
+                    elif duration > 300:
+                        self.show_warning("Window duration is very long (>5 minutes)")
+                    else:
+                        self.config.sliding_window_duration = duration
+                else:
+                    self.config.sliding_window_duration = 10.0
+                    
+            elif input_id == "update_rate":
+                if value:
+                    rate = float(value)
+                    if rate < 0.1:
+                        self.show_warning("Update rate must be at least 0.1 seconds")
+                    elif rate > 10:
+                        self.show_warning("Update rate is very slow (>10 seconds)")
+                    else:
+                        self.config.sliding_window_update_rate = rate
+                else:
+                    self.config.sliding_window_update_rate = 0.5
+                    
         except ValueError as e:
-            if "recent_frames" in input_id:
-                self.show_error("Recent frames must be a whole number")
-            elif "recent_seconds" in input_id or "fade_duration" in input_id:
+            if "fade_duration" in input_id:
                 self.show_error("Value must be a number")
             else:
                 self.show_error(f"Invalid input: {e}")
@@ -433,14 +445,9 @@ class MLGazeConfigApp(App):
         
         # Update UI elements with default values
         self.query_one("#input_directory", Input).value = "input"
-        self.query_one("#recent_frames", Input).value = "500" 
-        self.query_one("#recent_seconds", Input).value = "30.0"
         self.query_one("#fade_duration", Input).value = "5.0"
-        
-        # Reset radio buttons
-        self.query_one("#mode_all", RadioButton).value = True
-        self.query_one("#mode_frames", RadioButton).value = False  
-        self.query_one("#mode_seconds", RadioButton).value = False
+        self.query_one("#window_duration", Input).value = "10.0"
+        self.query_one("#update_rate", Input).value = "0.5"
         
         # Reset checkboxes
         self.query_one("#fade_trail", Checkbox).value = True
@@ -449,6 +456,11 @@ class MLGazeConfigApp(App):
         self.query_one("#camera_path", Checkbox).value = True
         self.query_one("#color_by_state", Checkbox).value = True
         self.query_one("#y_flip", Checkbox).value = False
+        self.query_one("#flip_camera", Checkbox).value = True
+        self.query_one("#sliding_window", Checkbox).value = False
+        self.query_one("#window_gaze", Checkbox).value = True
+        self.query_one("#window_trajectory", Checkbox).value = True
+        self.query_one("#window_camera", Checkbox).value = True
     
     @on(Button.Pressed, "#browse_directory")
     def browse_directory(self) -> None:

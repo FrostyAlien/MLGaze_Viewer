@@ -29,6 +29,7 @@ Build a Rerun-based visualizer that displays ML2 eye gaze rays in 3D space and 2
 - Coordinates system: All data are recorded using Unity, which is  left-handed, Y-up world coordinate system.
 - Rerun SDK Docs: https://rerun.io/docs/getting-started/what-is-rerun
 - Textual Docs: https://textual.textualize.io/guide/
+- The project package manager is "uv", do not use "python" to avoid conflicts with global Python packages.
 
 ### Critical Constraints
 - Match frameId to timestamps for synchronization
