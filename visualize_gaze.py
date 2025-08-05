@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 import cv2
 import rerun as rr
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from ui.config_app import run_configuration_tui, VisualizationConfig
 
@@ -224,6 +224,28 @@ def load_frame_metadata(csv_path: Path) -> pd.DataFrame:
     return df
 
 
+def load_imu_data(csv_path: Path) -> pd.DataFrame:
+    """Load IMU sensor data from CSV file.
+    
+    Args:
+        csv_path: Path to the IMU log CSV file
+        
+    Returns:
+        DataFrame with IMU data including timestamps, accelerometer, and gyroscope readings
+    """
+    print(f"Loading IMU data from {csv_path}")
+    df = pd.read_csv(csv_path)
+    
+    # Convert timestamp to int64 for nanosecond precision
+    df['timestamp'] = df['timestamp'].astype(np.int64)
+    
+    # Filter out invalid data
+    valid_data = df[df['hasValidData'] == True].copy() if 'hasValidData' in df.columns else df.copy()
+    
+    print(f"Loaded {len(df)} IMU samples ({len(valid_data)} valid)")
+    return valid_data
+
+
 def load_frame_compressed(frame_path: Path) -> bytes:
     """Load a single JPEG frame as compressed bytes for memory efficiency.
     
@@ -284,15 +306,102 @@ def get_gaze_color(gaze_state: str) -> List[int]:
     return colors.get(gaze_state, [128, 128, 128])  # Gray for unknown
 
 
+def apply_imu_axis_styling(entity_path: str, axis: str, color: List[int]) -> None:
+    """Apply SeriesLines styling to IMU axis with proper color.
+    
+    Args:
+        entity_path: Rerun entity path for the data
+        axis: Axis name (X, Y, Z)
+        color: RGB color values [R, G, B]
+    """
+    try:
+        rr.log(entity_path, rr.SeriesLines(colors=color, names=axis), static=True)
+    except Exception as e:
+        print(f"Warning: Could not apply styling to {entity_path}: {e}")
 
-def discover_data_files(input_dir: Path) -> Tuple[Path, Path, Path]:
+
+
+
+def log_imu_data(imu_df: pd.DataFrame) -> None:
+    """Log IMU sensor data to Rerun using efficient columnar logging.
+    
+    Args:
+        imu_df: DataFrame containing IMU data with timestamp and sensor readings
+    """
+    if imu_df.empty:
+        print("No IMU data to log")
+        return
+    
+    print(f"Logging {len(imu_df)} IMU samples using columnar method...")
+    
+    # Create time column for efficient logging (convert nanoseconds to seconds)
+    times = rr.TimeColumn("timestamp", timestamp=imu_df["timestamp"] * 1e-9)
+    
+    # Define clear, distinguishable colors for X/Y/Z axes
+    axis_colors = {
+        'X': [255, 80, 80],   # Bright Red - clear and distinct
+        'Y': [80, 200, 80],   # Bright Green - high contrast from red
+        'Z': [80, 120, 255]   # Bright Blue - distinct from red/green
+    }
+    
+    # Log accelerometer data with separate axes for proper naming
+    rr.send_columns(
+        "/sensors/imu/accelerometer/X",
+        indexes=[times],
+        columns=rr.Scalars.columns(scalars=imu_df["accelX"].values)
+    )
+    apply_imu_axis_styling("/sensors/imu/accelerometer/X", "X", axis_colors['X'])
+    
+    rr.send_columns(
+        "/sensors/imu/accelerometer/Y",
+        indexes=[times],
+        columns=rr.Scalars.columns(scalars=imu_df["accelY"].values)
+    )
+    apply_imu_axis_styling("/sensors/imu/accelerometer/Y", "Y", axis_colors['Y'])
+    
+    rr.send_columns(
+        "/sensors/imu/accelerometer/Z",
+        indexes=[times],
+        columns=rr.Scalars.columns(scalars=imu_df["accelZ"].values)
+    )
+    apply_imu_axis_styling("/sensors/imu/accelerometer/Z", "Z", axis_colors['Z'])
+    
+    # Log gyroscope data with separate axes for proper naming (same colors for consistency)
+    rr.send_columns(
+        "/sensors/imu/gyroscope/X",
+        indexes=[times],
+        columns=rr.Scalars.columns(scalars=imu_df["gyroX"].values)
+    )
+    apply_imu_axis_styling("/sensors/imu/gyroscope/X", "X", axis_colors['X'])
+    
+    rr.send_columns(
+        "/sensors/imu/gyroscope/Y",
+        indexes=[times],
+        columns=rr.Scalars.columns(scalars=imu_df["gyroY"].values)
+    )
+    apply_imu_axis_styling("/sensors/imu/gyroscope/Y", "Y", axis_colors['Y'])
+    
+    rr.send_columns(
+        "/sensors/imu/gyroscope/Z",
+        indexes=[times],
+        columns=rr.Scalars.columns(scalars=imu_df["gyroZ"].values)
+    )
+    apply_imu_axis_styling("/sensors/imu/gyroscope/Z", "Z", axis_colors['Z'])
+    
+    print(f"  Accelerometer: {len(imu_df)} samples to /sensors/imu/accelerometer/[X,Y,Z]")
+    print(f"  Gyroscope: {len(imu_df)} samples to /sensors/imu/gyroscope/[X,Y,Z]")
+
+
+
+def discover_data_files(input_dir: Path) -> Tuple[Path, Path, Path, Optional[Path]]:
     """Automatically discover gaze data files in the input directory.
 
     Args:
         input_dir: Input directory to search for data files
 
     Returns:
-        Tuple of (gaze_csv_path, metadata_csv_path, frames_dir_path)
+        Tuple of (gaze_csv_path, metadata_csv_path, frames_dir_path, imu_csv_path)
+        imu_csv_path will be None if no IMU data is found
 
     Raises:
         FileNotFoundError: If required files cannot be found
@@ -316,25 +425,34 @@ def discover_data_files(input_dir: Path) -> Tuple[Path, Path, Path]:
     if not frames_dir.exists():
         raise FileNotFoundError(f"No frames directory found at {frames_dir}")
 
+    # Find IMU log CSV (optional - contains "imu_log" in name)
+    imu_files = list(input_dir.glob("*imu_log*.csv"))
+    imu_csv = imu_files[0] if imu_files else None
+
     print(f"Discovered data files:")
     print(f"  Gaze data: {gaze_csv}")
     print(f"  Metadata: {metadata_csv}")
     print(f"  Frames: {frames_dir}")
+    if imu_csv:
+        print(f"  IMU data: {imu_csv}")
+    else:
+        print(f"  IMU data: Not found (optional)")
 
-    return gaze_csv, metadata_csv, frames_dir
+    return gaze_csv, metadata_csv, frames_dir, imu_csv
 
 
 
 
 def visualize_with_config(gaze_df: pd.DataFrame, metadata_df: pd.DataFrame,
-                          frames: Dict[str, bytes], config: VisualizationConfig,
-                          recording_stream: rr.RecordingStream):
+                          frames: Dict[str, bytes], imu_df: Optional[pd.DataFrame],
+                          config: VisualizationConfig, recording_stream: rr.RecordingStream):
     """Run visualization with the provided configuration using memory-efficient processing.
 
     Args:
         gaze_df: Complete gaze data
         metadata_df: Frame metadata
         frames: Loaded frame images as compressed JPEG bytes
+        imu_df: IMU sensor data (optional)
         config: Visualization configuration
         recording_stream: Rerun recording stream for logging data
     """
@@ -365,6 +483,10 @@ def visualize_with_config(gaze_df: pd.DataFrame, metadata_df: pd.DataFrame,
         ),
         static=True
     )
+    
+    # Log IMU data if available
+    if imu_df is not None and not imu_df.empty:
+        log_imu_data(imu_df)
     
     # Process data chronologically using memory-efficient batch processing
     print(f"Logging data to Rerun using memory-efficient batch processing...")
@@ -583,7 +705,7 @@ def main():
 
     # Discover data files
     try:
-        gaze_csv, metadata_csv, frames_dir = discover_data_files(actual_input_dir)
+        gaze_csv, metadata_csv, frames_dir, imu_csv = discover_data_files(actual_input_dir)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return
@@ -615,9 +737,18 @@ def main():
     gaze_df = load_gaze_screen_coords(gaze_csv)
     metadata_df = load_frame_metadata(metadata_csv)
     frames = load_all_frames(frames_dir)
+    
+    # Load IMU data if available and enabled
+    imu_df = None
+    if imu_csv and config.show_imu_data:
+        imu_df = load_imu_data(imu_csv)
+    elif imu_csv:
+        print("IMU data found but disabled in configuration")
+    else:
+        print("IMU data not available")
 
     # Run visualization with configuration
-    visualize_with_config(gaze_df, metadata_df, frames, config, rec)
+    visualize_with_config(gaze_df, metadata_df, frames, imu_df, config, rec)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ class VisualizationConfig:
     gaze_csv_file: str = ""  # Will be auto-detected or selected
     metadata_csv_file: str = ""  # Will be auto-detected or selected
     frames_directory: str = ""  # Will be auto-detected or selected
+    imu_csv_file: str = ""  # Will be auto-detected or selected
     
     # Visualization settings
     enable_fade_trail: bool = True
@@ -45,6 +46,9 @@ class VisualizationConfig:
     color_by_gaze_state: bool = True
     test_y_flip: bool = False
     flip_camera_frustum: bool = True  # Flip camera to match transformed coordinate system
+    
+    # IMU settings
+    show_imu_data: bool = True
 
 
 class DirectoryBrowserScreen(ModalScreen[str]):
@@ -328,6 +332,11 @@ class MLGazeConfigApp(App):
                         yield Checkbox("Color by Gaze State", value=True, id="color_by_state")
                         yield Checkbox("Test Y-Flip", value=False, id="y_flip")
                         yield Checkbox("Flip Camera Frustum", value=True, id="flip_camera")
+                    
+                    # IMU Sensor Data Section
+                    yield Static("IMU Sensor Data", classes="section-title")
+                    with Container(classes="section-content"):
+                        yield Checkbox("Show IMU Data", value=True, id="show_imu")
             
             # Action Buttons (full width, outside grid)
             with Container(classes="button-container"):
@@ -377,6 +386,12 @@ class MLGazeConfigApp(App):
             self.config.sliding_window_3d_trajectory = value
         elif checkbox_id == "window_camera":
             self.config.sliding_window_camera = value
+        elif checkbox_id == "show_imu":
+            self.config.show_imu_data = value
+            if value:
+                self.show_success("IMU sensor data visualization enabled")
+            else:
+                self.show_success("IMU sensor data visualization disabled")
     
     @on(Input.Changed)
     def input_changed(self, event: Input.Changed) -> None:
@@ -461,6 +476,7 @@ class MLGazeConfigApp(App):
         self.query_one("#window_gaze", Checkbox).value = True
         self.query_one("#window_trajectory", Checkbox).value = True
         self.query_one("#window_camera", Checkbox).value = True
+        self.query_one("#show_imu", Checkbox).value = True
     
     @on(Button.Pressed, "#browse_directory")
     def browse_directory(self) -> None:
