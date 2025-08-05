@@ -237,55 +237,18 @@ def load_frame_compressed(frame_path: Path) -> bytes:
         return f.read()
 
 
-def load_frames_chunked(frames_dir: Path, chunk_size: int = 100) -> List[Tuple[List[str], List[bytes]]]:
-    """Load JPEG frames in chunks as compressed bytes for memory efficiency.
+
+
+def load_all_frames(frames_dir: Path) -> Dict[str, bytes]:
+    """Load frame images as compressed JPEG bytes for memory-efficient visualization.
     
     Args:
         frames_dir: Directory containing frame_*.jpg files
-        chunk_size: Number of frames to load per chunk
         
     Returns:
-        List of tuples containing (frame_ids, compressed_bytes) for each chunk
+        Dictionary mapping frame IDs to compressed JPEG bytes
     """
-    print(f"Loading frames from {frames_dir} in chunks of {chunk_size}")
-    
-    # Get all jpg files
-    frame_files = sorted(frames_dir.glob("frame_*.jpg"))
-    chunks = []
-    
-    for i in range(0, len(frame_files), chunk_size):
-        chunk_end = min(i + chunk_size, len(frame_files))
-        chunk_files = frame_files[i:chunk_end]
-        
-        frame_ids = []
-        compressed_bytes = []
-        
-        for frame_path in chunk_files:
-            frame_id = frame_path.stem  # e.g., "frame_000001"
-            frame_ids.append(frame_id)
-            compressed_bytes.append(load_frame_compressed(frame_path))
-        
-        chunks.append((frame_ids, compressed_bytes))
-        print(f"Loaded chunk {len(chunks)}: {len(chunk_files)} frames")
-    
-    print(f"Loaded {len(frame_files)} frames in {len(chunks)} chunks")
-    return chunks
-
-
-def load_all_frames(frames_dir: Path) -> Dict[str, np.ndarray]:
-    """Load all JPEG frame images into memory for fast access.
-    
-    Note: This function loads all frames as uncompressed RGB arrays,
-    which uses significant RAM. For large datasets, consider using
-    load_frames_chunked() with compressed JPEG data instead.
-
-    Args:
-        frames_dir: Directory containing frame_*.jpg files
-
-    Returns:
-        Dictionary mapping frame IDs to RGB image arrays
-    """
-    print(f"Loading frames from {frames_dir}")
+    print(f"Loading frames from {frames_dir} (compressed)")
     frames = {}
 
     # Get all jpg files
@@ -293,11 +256,7 @@ def load_all_frames(frames_dir: Path) -> Dict[str, np.ndarray]:
 
     for i, frame_path in enumerate(frame_files):
         frame_id = frame_path.stem  # e.g., "frame_000001"
-        img = cv2.imread(str(frame_path))
-        if img is not None:
-            # Convert BGR to RGB for Rerun
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            frames[frame_id] = img
+        frames[frame_id] = load_frame_compressed(frame_path)
 
         if (i + 1) % 100 == 0:
             print(f"Loaded {i + 1}/{len(frame_files)} frames...")
@@ -323,6 +282,7 @@ def get_gaze_color(gaze_state: str) -> List[int]:
         'WinkLeft': [255, 0, 255],  # Magenta
     }
     return colors.get(gaze_state, [128, 128, 128])  # Gray for unknown
+
 
 
 def discover_data_files(input_dir: Path) -> Tuple[Path, Path, Path]:
@@ -364,15 +324,17 @@ def discover_data_files(input_dir: Path) -> Tuple[Path, Path, Path]:
     return gaze_csv, metadata_csv, frames_dir
 
 
+
+
 def visualize_with_config(gaze_df: pd.DataFrame, metadata_df: pd.DataFrame,
-                          frames: Dict[str, np.ndarray], config: VisualizationConfig,
+                          frames: Dict[str, bytes], config: VisualizationConfig,
                           recording_stream: rr.RecordingStream):
-    """Run visualization with the provided configuration.
+    """Run visualization with the provided configuration using memory-efficient processing.
 
     Args:
         gaze_df: Complete gaze data
         metadata_df: Frame metadata
-        frames: Loaded frame images
+        frames: Loaded frame images as compressed JPEG bytes
         config: Visualization configuration
         recording_stream: Rerun recording stream for logging data
     """
@@ -392,145 +354,166 @@ def visualize_with_config(gaze_df: pd.DataFrame, metadata_df: pd.DataFrame,
     if config.test_y_flip:
         print("Y-flip test enabled: screenPixelY = height - screenPixelY")
 
-    # Process data chronologically
-    print("Logging data to Rerun...")
+    # Log camera intrinsics once as static data for memory efficiency
+    rr.log(
+        "world/camera/image",
+        rr.Pinhole(
+            focal_length=focal_length,
+            principal_point=principal_point,
+            width=image_width,
+            height=image_height
+        ),
+        static=True
+    )
+    
+    # Process data chronologically using memory-efficient batch processing
+    print(f"Logging data to Rerun using memory-efficient batch processing...")
 
     # Collect positions for trajectory and point cloud visualization
     all_gaze_positions = []
-    all_gaze_colors = []
+    all_gaze_colors = []  
     all_gaze_radii = []
     camera_positions = []
 
-    # Track last logged frame to avoid redundant logging
+    # Collect and batch process all data
+    camera_data = {'positions': [], 'rotations': [], 'timestamps': []}
+    gaze_data = {'origins': [], 'vectors': [], 'positions': [], 'colors': [], 'timestamps': []}
+    screen_data = {'positions': [], 'colors': [], 'timestamps': []}
+    
     last_frame_id = None
-
+    
     for idx, (_, row) in enumerate(gaze_df.iterrows()):
-        # Set timeline to nanosecond timestamp
-        rr.set_time("timestamp", timestamp=1e-9 * int(row['timestamp']))
-
         frame_id = row['frameId']
-
-        # Log camera and frame if changed
+        timestamp_ns = int(row['timestamp'])
+        
+        # Log camera and frame data when frame changes
         if frame_id != last_frame_id and frame_id in frames:
-            # Camera transform (Unity to Rerun coordinates)
+            # Set timeline for this frame
+            rr.set_time("timestamp", timestamp=1e-9 * timestamp_ns)
+            
+            # Log compressed image
+            rr.log("world/camera/image", rr.EncodedImage(contents=frames[frame_id], media_type="image/jpeg"))
+            
+            # Collect camera transform data
             cam_pos_unity = [row['cameraPositionX'], row['cameraPositionY'], row['cameraPositionZ']]
             cam_pos = unity_to_rerun_position(cam_pos_unity)
-
+            
             cam_rot_unity = [row['cameraRotationX'], row['cameraRotationY'],
-                             row['cameraRotationZ'], row['cameraRotationW']]
+                           row['cameraRotationZ'], row['cameraRotationW']]
             cam_rot = unity_to_rerun_quaternion(cam_rot_unity)
-
-            # Apply camera flip if enabled (to match transformed coordinate system)
+            
             if config.flip_camera_frustum:
-                # 180-degree rotation around Y-axis to flip camera forward direction
-                y_flip_rotation = [0, 1, 0, 0]  # 180° around Y in XYZW format
+                y_flip_rotation = [0, 1, 0, 0]
                 cam_rot = compose_quaternions(cam_rot, y_flip_rotation)
-
-            # Log camera transform
+            
+            camera_data['positions'].append(cam_pos)
+            camera_data['rotations'].append(cam_rot)
+            camera_data['timestamps'].append(timestamp_ns)
+            
+            last_frame_id = frame_id
+        
+        # Collect gaze data
+        if row['isTracking'] and row['hasHitTarget']:
+            origin_unity = [row['gazeOriginX'], row['gazeOriginY'], row['gazeOriginZ']]
+            pos_unity = [row['gazePositionX'], row['gazePositionY'], row['gazePositionZ']]
+            
+            origin = unity_to_rerun_position(origin_unity)
+            position = unity_to_rerun_position(pos_unity)
+            vector = [position[0] - origin[0], position[1] - origin[1], position[2] - origin[2]]
+            color = get_gaze_color(row['gazeState'])
+            
+            gaze_data['origins'].append(origin)
+            gaze_data['vectors'].append(vector)
+            gaze_data['positions'].append(position)
+            gaze_data['colors'].append(color)
+            gaze_data['timestamps'].append(timestamp_ns)
+        
+        # Collect screen gaze data
+        if row['isValidProjection'] and not pd.isna(row['screenPixelX']):
+            screen_x = row['screenPixelX']
+            screen_y = row['screenPixelY']
+            
+            if config.test_y_flip:
+                screen_y = image_height - screen_y
+            
+            screen_data['positions'].append([screen_x, screen_y])
+            screen_data['colors'].append(get_gaze_color(row['gazeState']))
+            screen_data['timestamps'].append(timestamp_ns)
+        
+        if (idx + 1) % 1000 == 0:
+            print(f"Collected {idx + 1}/{len(gaze_df)} samples for batch processing...")
+    
+    # Log camera transforms in batch
+    if camera_data['positions']:
+        print(f"Logging {len(camera_data['positions'])} camera transforms in batch...")
+        for pos, rot, ts in zip(camera_data['positions'], camera_data['rotations'], camera_data['timestamps']):
+            rr.set_time("timestamp", timestamp=1e-9 * ts)
             rr.log(
                 "world/camera",
                 rr.Transform3D(
-                    translation=cam_pos,
-                    rotation=rr.Quaternion(xyzw=cam_rot)
+                    translation=pos,
+                    rotation=rr.Quaternion(xyzw=rot)
                 )
             )
-
-            # Log camera intrinsics
-            rr.log(
-                "world/camera/image",
-                rr.Pinhole(
-                    focal_length=focal_length,
-                    principal_point=principal_point,
-                    width=image_width,
-                    height=image_height
-                )
-            )
-
-            # Log camera image
-            rr.log(
-                "world/camera/image",
-                rr.Image(frames[frame_id])
-            )
-
-            # Collect camera position for trajectory
-            camera_positions.append(cam_pos)
-
-            last_frame_id = frame_id
-
-        # Log gaze ray and hit point per timestamp (simplified approach)
-        if row['isTracking'] and row['hasHitTarget']:
-            # Gaze origin and position in Unity coordinates
-            origin_unity = [row['gazeOriginX'], row['gazeOriginY'], row['gazeOriginZ']]
-            pos_unity = [row['gazePositionX'], row['gazePositionY'], row['gazePositionZ']]
-
-            # Convert to Rerun coordinates
-            origin = unity_to_rerun_position(origin_unity)
-            position = unity_to_rerun_position(pos_unity)
-
-            # Calculate vector from origin to position
-            vector = np.array(position) - np.array(origin)
-
-            # Get color based on gaze state
-            base_color = get_gaze_color(row['gazeState'])
-
-            # Log gaze ray (one per timestamp)
+        camera_positions.extend(camera_data['positions'])
+    
+    # Log gaze data in batch
+    if gaze_data['origins']:
+        print(f"Logging {len(gaze_data['origins'])} gaze rays in batch...")
+        for origin, vector, position, color, ts in zip(
+            gaze_data['origins'], gaze_data['vectors'], gaze_data['positions'], 
+            gaze_data['colors'], gaze_data['timestamps']):
+            
+            rr.set_time("timestamp", timestamp=1e-9 * ts)
+            
+            # Log gaze ray
             rr.log(
                 "world/gaze_ray",
                 rr.Arrows3D(
                     origins=[origin],
-                    vectors=[vector.tolist()],
-                    colors=[base_color],
+                    vectors=[vector],
+                    colors=[color],
                     radii=0.002
                 )
             )
-
+            
             # Log hit point
             rr.log(
                 "world/gaze_hit",
                 rr.Points3D(
                     positions=[position],
-                    colors=[base_color],
+                    colors=[color],
                     radii=0.01
                 )
             )
-
-            # Collect for point cloud visualization
-            all_gaze_positions.append(position)
-            all_gaze_colors.append(base_color)
-            all_gaze_radii.append(0.008)
-        # When not tracking: don't log anything (creates natural gap)
-
-        # Log 2D gaze point on camera image
-        if row['isValidProjection'] and not pd.isna(row['screenPixelX']):
-            # Get screen coordinates
-            screen_x = row['screenPixelX']
-            screen_y = row['screenPixelY']
-
-            # Apply Y-flip test if requested
-            if config.test_y_flip:
-                screen_y = image_height - screen_y
-
-            # # Clear previous 2D gaze point to show only current
-            # rr.log("world/camera/image/gaze_2d", rr.Clear(recursive=False))
-
-            # Log gaze point on 2D image
+        
+        all_gaze_positions.extend(gaze_data['positions'])
+        all_gaze_colors.extend(gaze_data['colors'])
+        all_gaze_radii.extend([0.008] * len(gaze_data['positions']))
+    
+    # Log screen gaze points in batch
+    if screen_data['positions']:
+        print(f"Logging {len(screen_data['positions'])} screen gaze points in batch...")
+        for pos, color, ts in zip(screen_data['positions'], screen_data['colors'], screen_data['timestamps']):
+            rr.set_time("timestamp", timestamp=1e-9 * ts)
             rr.log(
                 "world/camera/image/gaze_2d",
                 rr.Points2D(
-                    positions=[[screen_x, screen_y]],
-                    colors=[get_gaze_color(row['gazeState'])],
+                    positions=[pos],
+                    colors=[color],
                     radii=10
                 )
             )
 
-        # Strategic flushing every 5000 samples to prevent gRPC timeout
-        if (idx + 1) % 5000 == 0:
-            print(f"Processed {idx + 1}/{len(gaze_df)} gaze samples... flushing data")
-            flush_start = time.time()
-            recording_stream.flush(blocking=True)
-            flush_time = time.time() - flush_start
-            print(f"  Flush completed in {flush_time:.3f}s")
+    # Add static visualizations (trajectories, point clouds)
+    _add_static_visualizations(config, all_gaze_positions, all_gaze_colors, 
+                              all_gaze_radii, camera_positions, recording_stream)
 
+
+
+
+def _add_static_visualizations(config, all_gaze_positions, all_gaze_colors, all_gaze_radii, camera_positions, recording_stream):
+    """Add static visualizations like point clouds and trajectories."""
     if config.show_point_cloud and all_gaze_positions:
         print(f"Creating point clouds")
         rr.log("world/gaze_point_cloud", rr.Points3D(
@@ -605,8 +588,8 @@ def main():
         print(f"Error: {e}")
         return
 
-    # Initialize Rerun with explicit flush timeout
-    print("Initializing Rerun viewer with flush timeout configuration...")
+    # Initialize Rerun
+    print("Initializing Rerun viewer...")
     rec = rr.RecordingStream("ml2_gaze_viewer")
     rec.spawn()
 
