@@ -224,8 +224,60 @@ def load_frame_metadata(csv_path: Path) -> pd.DataFrame:
     return df
 
 
+def load_frame_compressed(frame_path: Path) -> bytes:
+    """Load a single JPEG frame as compressed bytes for memory efficiency.
+    
+    Args:
+        frame_path: Path to the JPEG frame file
+        
+    Returns:
+        Compressed JPEG bytes
+    """
+    with open(frame_path, 'rb') as f:
+        return f.read()
+
+
+def load_frames_chunked(frames_dir: Path, chunk_size: int = 100) -> List[Tuple[List[str], List[bytes]]]:
+    """Load JPEG frames in chunks as compressed bytes for memory efficiency.
+    
+    Args:
+        frames_dir: Directory containing frame_*.jpg files
+        chunk_size: Number of frames to load per chunk
+        
+    Returns:
+        List of tuples containing (frame_ids, compressed_bytes) for each chunk
+    """
+    print(f"Loading frames from {frames_dir} in chunks of {chunk_size}")
+    
+    # Get all jpg files
+    frame_files = sorted(frames_dir.glob("frame_*.jpg"))
+    chunks = []
+    
+    for i in range(0, len(frame_files), chunk_size):
+        chunk_end = min(i + chunk_size, len(frame_files))
+        chunk_files = frame_files[i:chunk_end]
+        
+        frame_ids = []
+        compressed_bytes = []
+        
+        for frame_path in chunk_files:
+            frame_id = frame_path.stem  # e.g., "frame_000001"
+            frame_ids.append(frame_id)
+            compressed_bytes.append(load_frame_compressed(frame_path))
+        
+        chunks.append((frame_ids, compressed_bytes))
+        print(f"Loaded chunk {len(chunks)}: {len(chunk_files)} frames")
+    
+    print(f"Loaded {len(frame_files)} frames in {len(chunks)} chunks")
+    return chunks
+
+
 def load_all_frames(frames_dir: Path) -> Dict[str, np.ndarray]:
     """Load all JPEG frame images into memory for fast access.
+    
+    Note: This function loads all frames as uncompressed RGB arrays,
+    which uses significant RAM. For large datasets, consider using
+    load_frames_chunked() with compressed JPEG data instead.
 
     Args:
         frames_dir: Directory containing frame_*.jpg files
