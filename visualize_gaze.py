@@ -143,9 +143,9 @@ def unity_to_rerun_position(pos: List[float]) -> List[float]:
     
     Need to:
     1. Flip Y-axis: Y_rdf = -Y_unity (up to down)
-    2. Flip Z-axis: Z_rdf = -Z_unity (change handedness)
+    2. Keep Z-axis: Z_rdf = Z_unity (forward stays forward)
     """
-    return [pos[0], -pos[1], -pos[2]]
+    return [pos[0], -pos[1], pos[2]]
 
 
 def unity_to_rerun_quaternion(q: List[float]) -> List[float]:
@@ -160,19 +160,11 @@ def unity_to_rerun_quaternion(q: List[float]) -> List[float]:
     # Convert quaternion to rotation matrix
     rot_matrix = quaternion_to_matrix(q)
 
-    # Unity to RDF requires two transformations:
-    # 1. Flip Y axis (up to down)
-    # 2. Change handedness (left to right)
-
-    # For left-handed to right-handed conversion with Y flip,
-    # we need to negate one additional axis. Since X stays right
-    # and we're flipping Y, we should negate Z to maintain proper handedness
-
-    # The transformation matrix that converts Unity axes to RDF axes
+    # Unity to RDF coordinate transformation
     unity_to_rdf = np.array([
-        [1, 0, 0],  # X stays right
+        [1, 0, 0],   # X stays right
         [0, -1, 0],  # Y flips (up to down)
-        [0, 0, -1]  # Z flips (to change handedness)
+        [0, 0, 1]    # Z stays forward
     ])
 
     # For rotation matrices, the transformation is: R_rdf = T * R_unity * T^(-1)
@@ -524,9 +516,6 @@ def visualize_with_config(gaze_df: pd.DataFrame, metadata_df: pd.DataFrame,
                            row['cameraRotationZ'], row['cameraRotationW']]
             cam_rot = unity_to_rerun_quaternion(cam_rot_unity)
             
-            if config.flip_camera_frustum:
-                y_flip_rotation = [0, 1, 0, 0]
-                cam_rot = compose_quaternions(cam_rot, y_flip_rotation)
             
             camera_data['positions'].append(cam_pos)
             camera_data['rotations'].append(cam_rot)
