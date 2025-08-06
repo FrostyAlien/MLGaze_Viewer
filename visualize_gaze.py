@@ -298,6 +298,30 @@ def get_gaze_color(gaze_state: str) -> List[int]:
     return colors.get(gaze_state, [128, 128, 128])  # Gray for unknown
 
 
+def log_coordinate_indicators(config: VisualizationConfig):
+    """Log coordinate system indicators at world origin.
+    
+    Creates three colored arrows at the world origin to visualize the
+    Rerun RDF coordinate system (X=right, Y=down, Z=forward).
+    """
+    if not config.show_coordinate_indicators:
+        return
+    
+    print("Adding coordinate system indicators at world origin")
+    
+    # RDF coordinate system: X=right, Y=down, Z=forward
+    rr.log(
+        "world/coords/origin",
+        rr.Arrows3D(
+            origins=[[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+            vectors=[[0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]],
+            colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],  # RGB = XYZ
+            radii=0.002,
+        ),
+        static=True
+    )
+
+
 def apply_imu_axis_styling(entity_path: str, axis: str, color: List[int]) -> None:
     """Apply SeriesLines styling to IMU axis with proper color.
     
@@ -713,6 +737,9 @@ def main():
 
     # Set coordinate system - RDF aligns with standard camera coordinates
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
+
+    # Log static coordinate indicators at world origin
+    log_coordinate_indicators(config)
 
     # Initial flush after setup
     print("Flushing initial setup...")

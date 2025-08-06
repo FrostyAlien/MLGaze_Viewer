@@ -45,6 +45,7 @@ class VisualizationConfig:
     show_camera_trajectory: bool = True
     color_by_gaze_state: bool = True
     test_y_flip: bool = False
+    show_coordinate_indicators: bool = True
     
     # IMU settings
     show_imu_data: bool = True
@@ -330,6 +331,7 @@ class MLGazeConfigApp(App):
                         yield Checkbox("Show Camera Path", value=True, id="camera_path")
                         yield Checkbox("Color by Gaze State", value=True, id="color_by_state")
                         yield Checkbox("Test Y-Flip", value=False, id="y_flip")
+                        yield Checkbox("Show Coordinate Indicators", value=True, id="coord_indicators")
                     
                     # IMU Sensor Data Section
                     yield Static("IMU Sensor Data", classes="section-title")
@@ -370,6 +372,8 @@ class MLGazeConfigApp(App):
             self.config.color_by_gaze_state = value
         elif checkbox_id == "y_flip":
             self.config.test_y_flip = value
+        elif checkbox_id == "coord_indicators":
+            self.config.show_coordinate_indicators = value
         elif checkbox_id == "sliding_window":
             self.config.enable_sliding_window = value
             if value:
@@ -467,6 +471,7 @@ class MLGazeConfigApp(App):
         self.query_one("#camera_path", Checkbox).value = True
         self.query_one("#color_by_state", Checkbox).value = True
         self.query_one("#y_flip", Checkbox).value = False
+        self.query_one("#coord_indicators", Checkbox).value = True
         self.query_one("#sliding_window", Checkbox).value = False
         self.query_one("#window_gaze", Checkbox).value = True
         self.query_one("#window_trajectory", Checkbox).value = True
