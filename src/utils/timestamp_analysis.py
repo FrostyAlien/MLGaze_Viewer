@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple timestamp analysis utility for MLGaze Viewer
+Timestamp analysis utility for MLGaze Viewer
 Analyzes timing differences between sensors to check synchronization
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from src.core import SessionData
 
 
 def analyze_timestamp_sync(gaze_df: pd.DataFrame, metadata_df: pd.DataFrame, imu_df: pd.DataFrame = None, sample_rate: float = 0.3):

@@ -4,9 +4,13 @@ MLGaze Viewer TUI Configuration App
 Textual-based terminal UI for configuring visualization parameters.
 """
 
-from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
+import sys
+
+# Add parent directory to path to import from src
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, ScrollableContainer
@@ -15,40 +19,8 @@ from textual.widgets import (
 )
 from textual.screen import ModalScreen
 
-
-@dataclass
-class VisualizationConfig:
-    """Configuration settings for gaze visualization."""
-    
-    # File paths
-    input_directory: str = "input"
-    gaze_csv_file: str = ""  # Will be auto-detected or selected
-    metadata_csv_file: str = ""  # Will be auto-detected or selected
-    frames_directory: str = ""  # Will be auto-detected or selected
-    imu_csv_file: str = ""  # Will be auto-detected or selected
-    
-    # Visualization settings
-    enable_fade_trail: bool = True
-    fade_duration: float = 5.0
-    
-    # Sliding window settings
-    enable_sliding_window: bool = False
-    sliding_window_duration: float = 10.0  # seconds
-    sliding_window_update_rate: float = 0.5  # seconds between updates
-    sliding_window_3d_gaze: bool = True  # Apply to 3D gaze points
-    sliding_window_3d_trajectory: bool = True  # Apply to 3D trajectories
-    sliding_window_camera: bool = True  # Apply to camera positions
-    
-    # Visualization toggles
-    show_point_cloud: bool = True
-    show_gaze_trajectory: bool = True
-    show_camera_trajectory: bool = True
-    color_by_gaze_state: bool = True
-    test_y_flip: bool = False
-    show_coordinate_indicators: bool = True
-    
-    # IMU settings
-    show_imu_data: bool = True
+# Import the centralized config from core module
+from src.core.config import VisualizationConfig
 
 
 class DirectoryBrowserScreen(ModalScreen[str]):
@@ -530,7 +502,7 @@ if __name__ == "__main__":
     if config:
         print("Configuration created:")
         print(f"  Input directory: {config.input_directory}")
-        print(f"  Temporal mode: {config.temporal_mode}")
+        print(f"  Fade trail: {'enabled' if config.enable_fade_trail else 'disabled'}")
         print(f"  Show point cloud: {config.show_point_cloud}")
         print(f"  Show trajectories: {config.show_gaze_trajectory}")
     else:
