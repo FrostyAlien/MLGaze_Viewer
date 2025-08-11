@@ -5,6 +5,7 @@ from typing import Dict, Tuple, Optional
 import pandas as pd
 import numpy as np
 from src.core import SessionData
+from src.utils.mlcf_extractor import MLCFExtractor
 
 
 class DataLoader:
@@ -77,37 +78,60 @@ class DataLoader:
     def _discover_files(self, input_dir: Path) -> Tuple[Path, Path, Path, Optional[Path]]:
         """Automatically discover data files in the input directory.
         
+        Searches recursively through subdirectories and handles MLCF extraction if needed.
+        
         Returns:
             Tuple of (gaze_csv, metadata_csv, frames_dir, imu_csv)
         """
-        # Find gaze screen coordinates CSV
-        gaze_files = list(input_dir.glob("*gaze_screen_coords*.csv"))
+        # Search recursively for gaze screen coordinates CSV
+        gaze_files = list(input_dir.rglob("*gaze_screen_coords*.csv"))
         if not gaze_files:
             raise FileNotFoundError(f"No gaze screen coordinates CSV found in {input_dir}")
         gaze_csv = gaze_files[0]
         
-        # Find frame metadata CSV
-        metadata_files = list(input_dir.glob("frame_metadata.csv"))
+        # Search recursively for frame metadata CSV
+        metadata_files = list(input_dir.rglob("frame_metadata.csv"))
         if not metadata_files:
             raise FileNotFoundError(f"No frame_metadata.csv found in {input_dir}")
         metadata_csv = metadata_files[0]
         
-        # Find frames directory
-        frames_dir = input_dir / "frames"
-        if not frames_dir.exists():
-            raise FileNotFoundError(f"No frames directory found at {frames_dir}")
+        # Determine frames location - prefer same directory as metadata
+        metadata_parent = metadata_csv.parent
+        frames_dir = metadata_parent / "frames"
         
-        # Find IMU log CSV (optional)
-        imu_files = list(input_dir.glob("*imu_log*.csv"))
+        # If frames directory doesn't exist, check for MLCF file
+        if not frames_dir.exists():
+            mlcf_files = list(metadata_parent.glob("*.mlcf"))
+            if not mlcf_files:
+                # Try searching in parent directories
+                mlcf_files = list(input_dir.rglob("*.mlcf"))
+            
+            if mlcf_files:
+                mlcf_file = mlcf_files[0]
+                if self.verbose:
+                    print(f"No frames directory found, but found MLCF file: {mlcf_file.name}")
+                    print(f"Extracting frames from MLCF container...")
+                
+                # Extract frames from MLCF
+                extractor = MLCFExtractor(verbose=self.verbose)
+                success = extractor.extract(mlcf_file, frames_dir)
+                
+                if not success:
+                    raise RuntimeError(f"Failed to extract frames from {mlcf_file}")
+            else:
+                raise FileNotFoundError(f"No frames directory or MLCF file found in {input_dir}")
+        
+        # Search recursively for IMU log CSV (optional)
+        imu_files = list(input_dir.rglob("*imu_log*.csv"))
         imu_csv = imu_files[0] if imu_files else None
         
         if self.verbose:
             print(f"Discovered files:")
-            print(f"  Gaze: {gaze_csv.name}")
-            print(f"  Metadata: {metadata_csv.name}")
-            print(f"  Frames: {frames_dir.name}/")
+            print(f"  Gaze: {gaze_csv.relative_to(input_dir)}")
+            print(f"  Metadata: {metadata_csv.relative_to(input_dir)}")
+            print(f"  Frames: {frames_dir.relative_to(input_dir)}/")
             if imu_csv:
-                print(f"  IMU: {imu_csv.name}")
+                print(f"  IMU: {imu_csv.relative_to(input_dir)}")
         
         return gaze_csv, metadata_csv, frames_dir, imu_csv
     
