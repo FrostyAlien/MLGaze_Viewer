@@ -3,6 +3,7 @@
 import struct
 from pathlib import Path
 from typing import Optional, Tuple
+from src.utils.logger import logger
 
 
 class MLCFExtractor:
@@ -22,6 +23,7 @@ class MLCFExtractor:
             verbose: Whether to print extraction progress
         """
         self.verbose = verbose
+        self.log = logger.get_logger('MLCFExtractor')
     
     def extract(self, mlcf_path: Path, output_dir: Path) -> bool:
         """Extract all frames from MLCF container to individual JPEG files.
@@ -35,18 +37,18 @@ class MLCFExtractor:
         """
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        if self.verbose:
-            print(f"Extracting frames from {mlcf_path.name} to {output_dir.name}/")
+        self.log.info(f"Starting MLCF extraction from {mlcf_path.name}")
+        self.log.info(f"Output directory: {output_dir}")
         
         with open(mlcf_path, 'rb') as f:
             try:
                 frame_count, first_frame_offset = self._read_header(f)
                 
-                if frame_count == 0 and self.verbose:
-                    print("  Warning: Frame count is 0 - recording may be incomplete")
-                    print("  Attempting to recover frames...")
-                elif self.verbose:
-                    print(f"  Container has {frame_count} frames")
+                if frame_count == 0:
+                    self.log.warning("Frame count is 0 - recording may be incomplete")
+                    self.log.info("Attempting to recover frames...")
+                else:
+                    self.log.info(f"Container reports {frame_count} frames")
                 
                 f.seek(first_frame_offset)
                 
@@ -61,8 +63,7 @@ class MLCFExtractor:
                         
                         # Validate JPEG data
                         if not self._is_valid_jpeg(jpeg_data):
-                            if self.verbose:
-                                print(f"  Warning: Invalid JPEG data for {frame_id}, skipping...")
+                            self.log.warning(f"Invalid JPEG data for {frame_id}, skipping...")
                             continue
                         
                         output_file = output_dir / f"{frame_id}.jpg"
@@ -70,28 +71,26 @@ class MLCFExtractor:
                             out_f.write(jpeg_data)
                         
                         extracted_count += 1
-                        if self.verbose and extracted_count % 100 == 0:
-                            print(f"  Extracted {extracted_count} frames...")
+                        if extracted_count % 100 == 0:
+                            self.log.debug(f"Progress: {extracted_count} frames extracted...")
+                        elif extracted_count % 1000 == 0:
+                            self.log.info(f"Progress: {extracted_count} frames extracted...")
                             
                     except (struct.error, UnicodeDecodeError) as e:
-                        if self.verbose:
-                            print(f"  Reached end of valid data at position {f.tell()}")
+                        self.log.debug(f"Reached end of valid data at position {f.tell()}")
                         break
                     except Exception as e:
-                        if self.verbose:
-                            print(f"  Error extracting frame: {e}")
+                        self.log.debug(f"Error extracting frame: {e}")
                         continue
                 
-                if self.verbose:
-                    print(f"  Successfully extracted {extracted_count} frames")
-                    if frame_count > 0 and extracted_count != frame_count:
-                        print(f"  Warning: Expected {frame_count} frames, extracted {extracted_count}")
+                self.log.success(f"Extraction complete: {extracted_count} frames extracted")
+                if frame_count > 0 and extracted_count != frame_count:
+                    self.log.warning(f"Frame count mismatch: expected {frame_count}, extracted {extracted_count}")
                 
                 return extracted_count > 0
                 
             except Exception as e:
-                if self.verbose:
-                    print(f"  Error extracting frames: {e}")
+                self.log.error(f"Failed to extract frames: {e}")
                 return False
     
     def _read_header(self, file) -> Tuple[int, int]:

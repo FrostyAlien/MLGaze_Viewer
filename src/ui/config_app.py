@@ -21,6 +21,7 @@ from textual.screen import ModalScreen
 
 # Import the centralized config from core module
 from src.core.config import VisualizationConfig
+from src.utils.session_utils import get_session_directories
 
 
 class DirectoryBrowserScreen(ModalScreen[str]):
@@ -203,29 +204,90 @@ class MLGazeConfigApp(App):
             input_field.add_class("invalid-path")
             return False
         
-        # Check for required data files
-        required_patterns = [
-            "*gaze_screen_coords*.csv",
-            "frame_metadata.csv",
-            "frames/"
-        ]
+        # Check for required data files using recursive search (matching DataLoader)
+        gaze_files = list(path_obj.rglob("*gaze_screen_coords*.csv"))
+        metadata_files = list(path_obj.rglob("frame_metadata.csv"))
         
-        missing_files = []
-        for pattern in required_patterns:
-            matches = list(path_obj.glob(pattern))
-            if not matches:
-                missing_files.append(pattern)
+        # Check for missing files
+        missing_required = []
+        if not gaze_files:
+            missing_required.append("gaze_screen_coords*.csv")
+        if not metadata_files:
+            missing_required.append("frame_metadata.csv")
         
-        if missing_files:
-            self.show_warning(f"Directory selected, but missing expected files: {', '.join(missing_files)}")
+        if missing_required:
+            self.show_error(f"Missing required files: {', '.join(missing_required)}")
+            input_field.remove_class("valid-path", "warning-path")
+            input_field.add_class("invalid-path")
+            return False
+        
+        # Check for multiple session conflicts (matching DataLoader)
+        conflict_detected = False
+        conflict_messages = []
+        
+        if len(gaze_files) > 1:
+            conflict_detected = True
+            conflict_messages.append(f"Found {len(gaze_files)} gaze files")
+            
+        if len(metadata_files) > 1:
+            conflict_detected = True
+            conflict_messages.append(f"Found {len(metadata_files)} metadata files")
+        
+        if conflict_detected:
+            # Get main session directories to recommend
+            session_dirs = get_session_directories(gaze_files, metadata_files, path_obj)
+            
+            suggestion = ""
+            if session_dirs:
+                session_names = [d.relative_to(path_obj) for d in session_dirs]
+                suggestion = f"\n\nTry selecting: {', '.join(map(str, session_names))}"
+            
+            error_msg = f"Multiple sessions detected: {', '.join(conflict_messages)}.{suggestion}"
+            self.show_error(error_msg)
+            input_field.remove_class("valid-path", "warning-path")
+            input_field.add_class("invalid-path")
+            return False
+        
+        # Single session validated - check frames/MLCF status
+        metadata_parent = metadata_files[0].parent
+        frames_dir = metadata_parent / "frames"
+        
+        # Check for frames or MLCF
+        frames_status = None
+        if frames_dir.exists():
+            frames_status = "ready"
+        else:
+            # Look for MLCF files (first in same dir, then recursively)
+            mlcf_files = list(metadata_parent.glob("*.mlcf"))
+            if not mlcf_files:
+                mlcf_files = list(path_obj.rglob("*.mlcf"))
+            
+            if mlcf_files:
+                if len(mlcf_files) > 1:
+                    self.show_error(f"Multiple MLCF files found: {len(mlcf_files)} files")
+                    input_field.remove_class("valid-path", "warning-path")
+                    input_field.add_class("invalid-path")
+                    return False
+                frames_status = "mlcf"
+        
+        # Set final status
+        if frames_status == "ready":
+            self.show_success("Valid MLGaze session with extracted frames")
+            input_field.remove_class("invalid-path", "warning-path")
+            input_field.add_class("valid-path")
+        elif frames_status == "mlcf":
+            self.notify(
+                "✓ Valid session - MLCF file will be extracted automatically",
+                severity="information",
+                timeout=5
+            )
+            input_field.remove_class("invalid-path", "warning-path")
+            input_field.add_class("valid-path")
+        else:
+            self.show_warning("CSV files found, but no frames or MLCF file detected")
             input_field.remove_class("valid-path", "invalid-path")
             input_field.add_class("warning-path")
-            # Don't block selection - user might have different file structure
-            return True
         
-        self.show_success(f"Valid MLGaze directory selected: {path}")
-        input_field.remove_class("invalid-path", "warning-path")
-        input_field.add_class("valid-path")
         return True
     
     def compose(self) -> ComposeResult:
