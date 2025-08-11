@@ -92,16 +92,7 @@ class DirectoryBrowserScreen(ModalScreen[str]):
                     self.app.log(f"Fallback path: {self.selected_path}")
         except Exception as e:
             self.app.log(f"Selection update error: {e}")
-    
-    @on(DirectoryTree.DirectorySelected)
-    def directory_selected(self, event: DirectoryTree.DirectorySelected) -> None:
-        """Handle double-click or Enter on directory - auto-select."""
-        try:
-            selected_path = str(event.path)
-            self.app.log(f"Directory selected via double-click: {selected_path}")
-            self.dismiss(selected_path)
-        except Exception as e:
-            self.app.log(f"Directory selection error: {e}")
+
     
     @on(Button.Pressed, "#select_dir")
     def select_directory(self) -> None:
