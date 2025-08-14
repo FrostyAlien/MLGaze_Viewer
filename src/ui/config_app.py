@@ -15,13 +15,13 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.widgets import (
-    Header, Footer, Static, Button, Input, Checkbox, RadioButton, RadioSet, DirectoryTree
+    Header, Footer, Static, Button, Input, Checkbox, Select, DirectoryTree
 )
 from textual.screen import ModalScreen
 
 # Import the centralized config from core module
 from src.core.config import VisualizationConfig
-from src.utils.session_utils import get_session_directories
+from src.core import SessionMetadata
 
 
 class DirectoryBrowserScreen(ModalScreen[str]):
@@ -167,6 +167,8 @@ class MLGazeConfigApp(App):
     def __init__(self):
         super().__init__()
         self.config = VisualizationConfig()
+        self.cameras = []  # Available cameras from session
+        self.session_validated = False  # Track if session directory is valid
     
     def show_error(self, message: str) -> None:
         """Show error notification to user."""
@@ -181,7 +183,7 @@ class MLGazeConfigApp(App):
         self.notify(message, severity="warning", timeout=4)
     
     def validate_directory(self, path: str) -> bool:
-        """Validate if directory contains required MLGaze data files."""
+        """Validate if directory contains required organized session structure."""
         input_field = self.query_one("#input_directory", Input)
         
         if not path:
@@ -204,91 +206,164 @@ class MLGazeConfigApp(App):
             input_field.add_class("invalid-path")
             return False
         
-        # Check for required data files using recursive search (matching DataLoader)
-        gaze_files = list(path_obj.rglob("*gaze_screen_coords*.csv"))
-        metadata_files = list(path_obj.rglob("frame_metadata.csv"))
-        
-        # Check for missing files
-        missing_required = []
-        if not gaze_files:
-            missing_required.append("gaze_screen_coords*.csv")
-        if not metadata_files:
-            missing_required.append("frame_metadata.csv")
-        
-        if missing_required:
-            self.show_error(f"Missing required files: {', '.join(missing_required)}")
+        # Validate organized session structure
+        try:
+            self._validate_session_structure(path_obj)
+            # If validation passes, try to load session metadata to get cameras
+            self._load_session_info(path_obj)
+        except (FileNotFoundError, ValueError) as e:
+            self.show_error(f"Invalid session structure: {e}")
             input_field.remove_class("valid-path", "warning-path")
             input_field.add_class("invalid-path")
             return False
         
-        # Check for multiple session conflicts (matching DataLoader)
-        conflict_detected = False
-        conflict_messages = []
-        
-        if len(gaze_files) > 1:
-            conflict_detected = True
-            conflict_messages.append(f"Found {len(gaze_files)} gaze files")
-            
-        if len(metadata_files) > 1:
-            conflict_detected = True
-            conflict_messages.append(f"Found {len(metadata_files)} metadata files")
-        
-        if conflict_detected:
-            # Get main session directories to recommend
-            session_dirs = get_session_directories(gaze_files, metadata_files, path_obj)
-            
-            suggestion = ""
-            if session_dirs:
-                session_names = [d.relative_to(path_obj) for d in session_dirs]
-                suggestion = f"\n\nTry selecting: {', '.join(map(str, session_names))}"
-            
-            error_msg = f"Multiple sessions detected: {', '.join(conflict_messages)}.{suggestion}"
-            self.show_error(error_msg)
-            input_field.remove_class("valid-path", "warning-path")
-            input_field.add_class("invalid-path")
-            return False
-        
-        # Single session validated - check frames/MLCF status
-        metadata_parent = metadata_files[0].parent
-        frames_dir = metadata_parent / "frames"
-        
-        # Check for frames or MLCF
-        frames_status = None
-        if frames_dir.exists():
-            frames_status = "ready"
-        else:
-            # Look for MLCF files (first in same dir, then recursively)
-            mlcf_files = list(metadata_parent.glob("*.mlcf"))
-            if not mlcf_files:
-                mlcf_files = list(path_obj.rglob("*.mlcf"))
-            
-            if mlcf_files:
-                if len(mlcf_files) > 1:
-                    self.show_error(f"Multiple MLCF files found: {len(mlcf_files)} files")
-                    input_field.remove_class("valid-path", "warning-path")
-                    input_field.add_class("invalid-path")
-                    return False
-                frames_status = "mlcf"
-        
-        # Set final status
-        if frames_status == "ready":
-            self.show_success("Valid MLGaze session with extracted frames")
-            input_field.remove_class("invalid-path", "warning-path")
-            input_field.add_class("valid-path")
-        elif frames_status == "mlcf":
-            self.notify(
-                "✓ Valid session - MLCF file will be extracted automatically",
-                severity="information",
-                timeout=5
-            )
-            input_field.remove_class("invalid-path", "warning-path")
-            input_field.add_class("valid-path")
-        else:
-            self.show_warning("CSV files found, but no frames or MLCF file detected")
-            input_field.remove_class("valid-path", "invalid-path")
-            input_field.add_class("warning-path")
-        
+        # If we get here, validation passed
+        input_field.remove_class("invalid-path", "warning-path")
+        input_field.add_class("valid-path")
+        self.session_validated = True
+        self.show_success("Valid session directory")
+        # Now show camera selection UI if multiple cameras available
+        self._show_camera_selection_ui()
         return True
+    
+    def _validate_session_structure(self, session_path: Path) -> None:
+        """Validate organized session structure with warnings for missing optional files."""
+        # Check required directories
+        cameras_dir = session_path / "cameras"
+        sensors_dir = session_path / "sensors"
+        
+        missing_dirs = []
+        if not cameras_dir.exists():
+            missing_dirs.append("cameras/")
+        if not sensors_dir.exists():
+            missing_dirs.append("sensors/")
+        
+        if missing_dirs:
+            raise FileNotFoundError(f"Required directories missing: {', '.join(missing_dirs)}")
+        
+        # Check for at least one camera
+        camera_dirs = [d for d in cameras_dir.iterdir() if d.is_dir()]
+        if not camera_dirs:
+            raise ValueError("No camera directories found in cameras/")
+        
+        # Check required sensor files
+        gaze_data_file = sensors_dir / "gaze_data.csv"
+        if not gaze_data_file.exists():
+            raise FileNotFoundError("Required file missing: sensors/gaze_data.csv")
+        
+        # Check optional sensor files
+        imu_data_file = sensors_dir / "imu_data.csv"
+        if not imu_data_file.exists():
+            self.show_warning("Optional file missing: sensors/imu_data.csv (IMU visualization disabled)")
+        
+        # Validate each camera directory with warnings for optional files
+        warnings = []
+        for camera_dir in camera_dirs:
+            camera_name = camera_dir.name
+            
+            # Required: frame metadata
+            frame_metadata = camera_dir / "frame_metadata.csv"
+            if not frame_metadata.exists():
+                raise FileNotFoundError(f"Camera {camera_name} missing required frame_metadata.csv")
+            
+            # Required: at least one frame source
+            frames_dir = camera_dir / "frames"
+            mlcf_file = camera_dir / "camera_frames.mlcf"
+            
+            if not frames_dir.exists() and not mlcf_file.exists():
+                raise FileNotFoundError(
+                    f"Camera {camera_name} missing both frames/ directory and camera_frames.mlcf"
+                )
+            
+            # Optional: gaze screen coordinates
+            gaze_screen_coords = camera_dir / "gaze_screen_coords.csv"
+            if not gaze_screen_coords.exists():
+                warnings.append(f"Camera {camera_name} missing gaze_screen_coords.csv (2D gaze overlay disabled)")
+        
+        # Show warnings for missing optional files
+        if warnings:
+            for warning in warnings:
+                self.show_warning(warning)
+    
+    def _load_session_info(self, session_path: Path) -> None:
+        """Load session information and update UI for camera selection."""
+        try:
+            # Try to load metadata for camera info
+            metadata_file = session_path / "metadata.json"
+            if metadata_file.exists():
+                metadata = SessionMetadata.from_json_file(metadata_file)
+                self.cameras = metadata.get_camera_names()
+            else:
+                # Get cameras from directory structure
+                cameras_dir = session_path / "cameras"
+                self.cameras = [d.name for d in cameras_dir.iterdir() if d.is_dir()]
+            
+            # Update camera selection UI if multiple cameras
+            self._show_camera_selection_ui()
+            
+        except Exception as e:
+            # Continue without camera selection - basic validation passed
+            self.cameras = []
+    
+    def _show_camera_selection_ui(self) -> None:
+        """Show camera selection UI after successful directory validation."""
+        
+        try:
+            camera_container = self.query_one("#camera_selection")
+            if len(self.cameras) <= 1:
+                # Hide camera selection if only one or no cameras
+                camera_container.display = False
+                # Set the single camera as primary if available
+                if len(self.cameras) == 1:
+                    self.config.primary_camera = self.cameras[0]
+                    self.show_success(f"Single camera found: {self.cameras[0]}")
+            else:
+                # Show camera selection for multiple cameras
+                camera_container.display = True
+                
+                # Update Select dropdown
+                try:
+                    camera_select = self.query_one("#primary_camera", Select)
+                    
+                    # Create options for the Select widget (label, value pairs)
+                    options = [(camera_name, camera_name) for camera_name in self.cameras]
+                    
+                    # Set the options
+                    camera_select.set_options(options)
+                    
+                    # Set first camera as default
+                    if self.cameras:
+                        camera_select.value = self.cameras[0]
+                        self.config.primary_camera = self.cameras[0]
+                        self.show_success(f"Multiple cameras found. Primary set to: {self.cameras[0]}")
+                        
+                except Exception as e:
+                    self.show_error(f"Failed to populate camera selection: {e}")
+                    
+        except Exception as e:
+            self.show_error(f"Camera selection UI error: {e}")
+    
+    def _hide_camera_selection_ui(self) -> None:
+        """Hide camera selection UI when directory becomes invalid."""
+        try:
+            camera_container = self.query_one("#camera_selection")
+            camera_container.display = False
+        except Exception as e:
+            pass  # Silently handle UI cleanup errors
+        self.cameras = []
+        self.config.primary_camera = ""
+    
+    def _create_camera_selection_section(self):
+        """Create the camera selection section (initially hidden)."""
+        yield Static("Primary Camera (3D View)", classes="section-title", id="camera_section_title")
+        with Container(classes="section-content", id="camera_selection") as container:
+            container.display = False  # Initially hidden until session is validated
+            yield Static("Select primary camera for 3D visualization:", id="camera_instruction")
+            yield Select(
+                options=[],  # Empty initially, will be populated dynamically
+                prompt="Select a camera",
+                id="primary_camera"
+            )
     
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
@@ -300,19 +375,20 @@ class MLGazeConfigApp(App):
             with Container(classes="grid-container"):
                 # Left Column - File and Temporal Settings  
                 with Container(classes="left-column"):
-                    # File Path Section
                     yield Static("Data Files", classes="section-title")
                     with Container(classes="section-content"):
                         yield Static("Input Directory:")
                         with Horizontal():
                             yield Input(
-                                placeholder="input", 
-                                value="input", 
+                                placeholder="Select session directory...", 
+                                value="", 
                                 id="input_directory"
                             )
                             yield Button("Browse", id="browse_directory")
                     
-                    # Trail Settings Section
+                    # Camera Selection Section (dynamic based on available cameras)
+                    yield from self._create_camera_selection_section()
+                    
                     yield Static("Trail Effects", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Enable Trail Fade", value=True, id="fade_trail")
@@ -324,7 +400,6 @@ class MLGazeConfigApp(App):
                             id="fade_duration"
                         )
                     
-                    # Sliding Window Section
                     yield Static("Sliding Window (3D only)", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Enable Sliding Window", value=False, id="sliding_window")
@@ -358,7 +433,6 @@ class MLGazeConfigApp(App):
                         yield Checkbox("Test Y-Flip", value=False, id="y_flip")
                         yield Checkbox("Show Coordinate Indicators", value=True, id="coord_indicators")
                     
-                    # IMU Sensor Data Section
                     yield Static("IMU Sensor Data", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Show IMU Data", value=True, id="show_imu")
@@ -378,6 +452,14 @@ class MLGazeConfigApp(App):
         # Set focus to first input field
         self.query_one("#input_directory", Input).focus()
     
+    
+    @on(Select.Changed)
+    def camera_selection_changed(self, event: Select.Changed) -> None:
+        """Handle primary camera selection changes."""
+        if event.select.id == "primary_camera":
+            selected_camera = event.value
+            if selected_camera:  # Ensure a value was selected
+                self.config.primary_camera = selected_camera
     
     @on(Checkbox.Changed)
     def checkbox_changed(self, event: Checkbox.Changed) -> None:
@@ -401,10 +483,6 @@ class MLGazeConfigApp(App):
             self.config.show_coordinate_indicators = value
         elif checkbox_id == "sliding_window":
             self.config.enable_sliding_window = value
-            if value:
-                self.show_success("Sliding window enabled for 3D data")
-            else:
-                self.show_success("Sliding window disabled")
         elif checkbox_id == "window_gaze":
             self.config.sliding_window_3d_gaze = value
         elif checkbox_id == "window_trajectory":
@@ -413,10 +491,6 @@ class MLGazeConfigApp(App):
             self.config.sliding_window_camera = value
         elif checkbox_id == "show_imu":
             self.config.show_imu_data = value
-            if value:
-                self.show_success("IMU sensor data visualization enabled")
-            else:
-                self.show_success("IMU sensor data visualization disabled")
     
     @on(Input.Changed)
     def input_changed(self, event: Input.Changed) -> None:
@@ -426,10 +500,19 @@ class MLGazeConfigApp(App):
         
         try:
             if input_id == "input_directory":
-                self.config.input_directory = value if value else "input"
+                self.config.input_directory = value if value else ""
+                # Reset session validation state when directory changes
+                if not self.session_validated or value != self.config.input_directory:
+                    self.session_validated = False
+                    self._hide_camera_selection_ui()
+                
                 # Validate directory path with user feedback
-                if value and len(value) > 2:  # Avoid validating every keystroke
+                if value and len(value) > 3:  # Avoid validating every keystroke
                     self.validate_directory(value)
+                elif not value:
+                    # Clear validation when input is empty
+                    input_field = self.query_one("#input_directory", Input)
+                    input_field.remove_class("valid-path", "invalid-path", "warning-path")
                     
             elif input_id == "fade_duration":
                 if value:
@@ -476,6 +559,10 @@ class MLGazeConfigApp(App):
     @on(Button.Pressed, "#start_viz")
     def start_visualization(self) -> None:
         """Handle Start Visualization button."""
+        if not self.session_validated or not self.config.input_directory:
+            self.show_error("Please select a valid session directory first")
+            return
+        
         self.exit(self.config)
     
     @on(Button.Pressed, "#reset")
@@ -483,8 +570,12 @@ class MLGazeConfigApp(App):
         """Handle Reset button."""
         self.config = VisualizationConfig()
         
+        # Reset session validation
+        self.session_validated = False
+        self._hide_camera_selection_ui()
+        
         # Update UI elements with default values
-        self.query_one("#input_directory", Input).value = "input"
+        self.query_one("#input_directory", Input).value = ""
         self.query_one("#fade_duration", Input).value = "5.0"
         self.query_one("#window_duration", Input).value = "10.0"
         self.query_one("#update_rate", Input).value = "0.5"
@@ -514,12 +605,10 @@ class MLGazeConfigApp(App):
             self.push_screen(browser, callback=self.on_directory_selected)
         except Exception as e:
             self.show_error(f"Directory browser error: {e}")
-            self.log(f"Directory browser exception: {e}")
     
     def on_directory_selected(self, result: str | None) -> None:
         """Handle directory selection result from browser."""
         if result:  # User selected a directory
-            self.log(f"Directory browser returned: {result}")
             try:
                 input_field = self.query_one("#input_directory", Input)
                 input_field.value = result
@@ -528,9 +617,6 @@ class MLGazeConfigApp(App):
                 self.validate_directory(result)
             except Exception as e:
                 self.show_error(f"Error updating directory selection: {e}")
-                self.log(f"Directory update exception: {e}")
-        else:
-            self.log("Directory browser cancelled or returned None")
 
 
 def run_configuration_tui() -> Optional[VisualizationConfig]:

@@ -1,13 +1,12 @@
 """Data loading utilities for MLGaze Viewer with memory-efficient processing."""
 
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Optional, List
 import pandas as pd
 import numpy as np
-from src.core import SessionData
+from src.core import SessionData, SessionMetadata
 from src.utils.mlcf_extractor import MLCFExtractor
 from src.utils.logger import logger
-from src.utils.session_utils import get_session_directories
 
 
 class DataLoader:
@@ -24,291 +23,341 @@ class DataLoader:
         self.verbose = verbose
         self.log = logger.get_logger('DataLoader')
     
-    def load_session(self, input_dir: str) -> SessionData:
-        """Load all sensor data from a session directory.
+    def load_session(self, session_dir: str) -> SessionData:
+        """Load all sensor data from an organized session directory.
+        
+        Expected structure:
+        session_dir/
+        ├── metadata.json                    # Session information
+        ├── cameras/
+        │   ├── camera_name/                 # One or more cameras
+        │   │   ├── camera_frames.mlcf       # Binary frame container
+        │   │   ├── frame_metadata.csv       # Frame timestamps & poses
+        │   │   └── gaze_screen_coords.csv   # Optional: Gaze in camera coordinates
+        │   └── ...
+        └── sensors/
+            ├── gaze_data.csv                # 3D world gaze data
+            └── imu_data.csv                 # Optional: IMU sensor data
         
         Args:
-            input_dir: Path to the input directory containing data files
+            session_dir: Path to the organized session directory
             
         Returns:
             SessionData object containing all loaded data
             
         Raises:
-            FileNotFoundError: If required files are not found
+            FileNotFoundError: If required files or directories are not found
+            ValueError: If session structure is invalid
         """
-        input_path = Path(input_dir)
-        if not input_path.exists():
-            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+        session_path = Path(session_dir)
+        if not session_path.exists():
+            raise FileNotFoundError(f"Session directory not found: {session_dir}")
         
-        self.log.info(f"Loading session data from: {input_path}")
+        self.log.info(f"Loading organized session from: {session_path}")
         
-        # Discover data files
-        gaze_csv, metadata_csv, frames_dir, imu_csv = self._discover_files(input_path)
+        # Validate session structure
+        self._validate_session_structure(session_path)
         
-        # Load data components
-        gaze_df = self._load_gaze_data(gaze_csv)
-        metadata_df = self._load_metadata(metadata_csv)
-        frames = self._load_frames(frames_dir)
+        # Load session metadata
+        metadata = self._load_session_metadata(session_path)
         
-        # Extract camera poses from gaze data (which contains camera info)
-        camera_poses_df = self._extract_camera_poses(gaze_df)
+        # Load all camera data
+        cameras_data = self._load_all_cameras(session_path / "cameras")
         
-        # Load optional IMU data
-        imu_df = None
-        if imu_csv:
-            imu_df = self._load_imu_data(imu_csv)
+        # Load sensor data
+        gaze_3d = self._load_csv(session_path / "sensors" / "gaze_data.csv", "3D gaze data")
         
-        # Create session ID from directory name
-        session_id = input_path.name
+        # Validate 3D gaze data columns
+        required_gaze_3d_cols = ['timestamp', 'gazeOriginX', 'gazeOriginY', 'gazeOriginZ',
+                               'gazePositionX', 'gazePositionY', 'gazePositionZ',
+                               'isTracking', 'hasHitTarget', 'gazeState']
+        self._validate_csv_columns(gaze_3d, required_gaze_3d_cols, "sensors/gaze_data.csv")
         
-        # Create and return SessionData
+        imu = self._load_csv_optional(session_path / "sensors" / "imu_data.csv", "IMU data")
+        
+        # Determine primary camera (first one alphabetically by default)
+        primary_camera = sorted(cameras_data['frames'].keys())[0] if cameras_data['frames'] else ""
+        
+        # Create SessionData
         session = SessionData(
-            gaze=gaze_df,
-            frames=frames,
-            camera_poses=camera_poses_df,
-            metadata=metadata_df,
-            imu=imu_df,
-            session_id=session_id,
-            input_directory=str(input_path)
+            frames=cameras_data['frames'],
+            camera_metadata=cameras_data['metadata'],
+            gaze_screen_coords=cameras_data['gaze_coords'],
+            gaze=gaze_3d,
+            imu=imu,
+            metadata=metadata,
+            primary_camera=primary_camera,
+            session_id=metadata.session_id if metadata else session_path.name,
+            input_directory=str(session_path)
         )
         
         self.log.info(f"Session loaded successfully:\n{session.summary()}")
         
         return session
     
-    def _discover_files(self, input_dir: Path) -> Tuple[Path, Path, Path, Optional[Path]]:
-        """Automatically discover data files in the input directory.
-        
-        Searches recursively through subdirectories and handles MLCF extraction if needed.
-        
-        Returns:
-            Tuple of (gaze_csv, metadata_csv, frames_dir, imu_csv)
-        """
-        # Search recursively for required files
-        gaze_files = list(input_dir.rglob("*gaze_screen_coords*.csv"))
-        metadata_files = list(input_dir.rglob("frame_metadata.csv"))
-        
-        # Check for missing files
-        if not gaze_files:
-            raise FileNotFoundError(f"No gaze screen coordinates CSV found in {input_dir}")
-        if not metadata_files:
-            raise FileNotFoundError(f"No frame_metadata.csv found in {input_dir}")
-        
-        # Check for multiple files (ambiguous sessions)
-        self._validate_single_session(gaze_files, metadata_files, input_dir)
-        
-        gaze_csv = gaze_files[0]
-        metadata_csv = metadata_files[0]
-        
-        # Determine frames location - prefer same directory as metadata
-        metadata_parent = metadata_csv.parent
-        frames_dir = metadata_parent / "frames"
-        
-        # If frames directory doesn't exist, check for MLCF file
-        if not frames_dir.exists():
-            mlcf_files = list(metadata_parent.glob("*.mlcf"))
-            if not mlcf_files:
-                # Try searching in parent directories
-                mlcf_files = list(input_dir.rglob("*.mlcf"))
-            
-            if mlcf_files:
-                # Check for multiple MLCF files
-                if len(mlcf_files) > 1:
-                    self.log.error(f"Multiple MLCF files found:")
-                    for mf in mlcf_files:
-                        self.log.error(f"  - {mf.relative_to(input_dir)}")
-                    raise ValueError(
-                        f"Ambiguous MLCF files: Found {len(mlcf_files)} MLCF files. "
-                        f"Please select a specific session subdirectory."
-                    )
-                
-                mlcf_file = mlcf_files[0]
-                self.log.info(f"No frames directory found, but found MLCF file: {mlcf_file.name}")
-                self.log.info(f"Starting automatic MLCF extraction to {frames_dir.relative_to(input_dir)}/")
-                
-                # Extract frames from MLCF
-                extractor = MLCFExtractor(verbose=self.verbose)
-                success = extractor.extract(mlcf_file, frames_dir)
-                
-                if not success:
-                    self.log.error(f"Failed to extract frames from {mlcf_file}")
-                    raise RuntimeError(f"Failed to extract frames from {mlcf_file}")
-                else:
-                    self.log.success(f"MLCF extraction completed successfully")
-            else:
-                raise FileNotFoundError(f"No frames directory or MLCF file found in {input_dir}")
-        
-        # Search recursively for IMU log CSV (optional)
-        imu_files = list(input_dir.rglob("*imu_log*.csv"))
-        imu_csv = imu_files[0] if imu_files else None
-        
-        self.log.info(f"Discovered files:")
-        self.log.info(f"  Gaze: {gaze_csv.relative_to(input_dir)}")
-        self.log.info(f"  Metadata: {metadata_csv.relative_to(input_dir)}")
-        self.log.info(f"  Frames: {frames_dir.relative_to(input_dir)}/")
-        if imu_csv:
-            self.log.info(f"  IMU: {imu_csv.relative_to(input_dir)}")
-        else:
-            self.log.debug(f"  IMU: Not found (optional)")
-        
-        return gaze_csv, metadata_csv, frames_dir, imu_csv
-    
-    
-    def _validate_single_session(self, gaze_files: list, metadata_files: list, input_dir: Path) -> None:
-        """Validate that only one session's files are found.
+    def _validate_session_structure(self, session_path: Path) -> None:
+        """Validate that the session directory has the required structure.
         
         Args:
-            gaze_files: List of gaze CSV files found
-            metadata_files: List of metadata CSV files found
-            input_dir: Input directory path for relative path display
+            session_path: Path to the session directory
             
         Raises:
-            ValueError: If multiple session files are found
+            FileNotFoundError: If required directories or files are missing
+            ValueError: If session structure is invalid
         """
-        errors = []
+        # Check required directories
+        cameras_dir = session_path / "cameras"
+        sensors_dir = session_path / "sensors"
         
-        if len(gaze_files) > 1:
-            errors.append(f"Found {len(gaze_files)} gaze files:")
-            for gf in gaze_files:
-                errors.append(f"  - {gf.relative_to(input_dir)}")
+        required_dirs = [cameras_dir, sensors_dir]
+        missing_dirs = [str(d) for d in required_dirs if not d.exists()]
         
-        if len(metadata_files) > 1:
-            errors.append(f"Found {len(metadata_files)} metadata files:")
-            for mf in metadata_files:
-                errors.append(f"  - {mf.relative_to(input_dir)}")
+        if missing_dirs:
+            raise FileNotFoundError(f"Required directories missing: {missing_dirs}")
         
-        if errors:
-            self.log.error("Multiple session files detected:")
-            for error in errors:
-                self.log.error(error)
+        # Check for at least one camera directory
+        camera_dirs = [d for d in cameras_dir.iterdir() if d.is_dir()]
+        if not camera_dirs:
+            raise ValueError("No camera directories found in cameras/")
+        
+        # Check required sensor files
+        gaze_data_file = sensors_dir / "gaze_data.csv"
+        if not gaze_data_file.exists():
+            raise FileNotFoundError(f"Required file missing: {gaze_data_file}")
+        
+        # Validate each camera directory
+        for camera_dir in camera_dirs:
+            frame_metadata = camera_dir / "frame_metadata.csv"
+            if not frame_metadata.exists():
+                raise FileNotFoundError(f"Camera {camera_dir.name} missing frame_metadata.csv")
             
-            # Get main session directories to recommend
-            session_dirs = get_session_directories(gaze_files, metadata_files, input_dir)
+            # Check for frames (either directory or MLCF file)
+            frames_dir = camera_dir / "frames"
+            mlcf_file = camera_dir / "camera_frames.mlcf"
             
-            suggestion = ""
-            if session_dirs:
-                session_names = [d.relative_to(input_dir) for d in session_dirs]
-                suggestion = f" Try selecting one of: {', '.join(map(str, session_names))}"
-            
-            raise ValueError(
-                f"Ambiguous session data: Multiple files found. "
-                f"Please select a specific session subdirectory instead.{suggestion}"
-            )
+            if not frames_dir.exists() and not mlcf_file.exists():
+                raise FileNotFoundError(
+                    f"Camera {camera_dir.name} missing both frames/ directory and camera_frames.mlcf"
+                )
+        
+        self.log.info(f"Session structure validated: {len(camera_dirs)} cameras found")
     
-    def _load_gaze_data(self, csv_path: Path) -> pd.DataFrame:
-        """Load gaze data from CSV with proper data types."""
-        self.log.info(f"Loading gaze data from {csv_path.name}...")
+    
+    def _load_session_metadata(self, session_path: Path) -> Optional[SessionMetadata]:
+        """Load session metadata from metadata.json file.
         
-        # For large files, use chunked reading
-        file_size = csv_path.stat().st_size / (1024 * 1024)  # Size in MB
+        Args:
+            session_path: Path to the session directory
+            
+        Returns:
+            SessionMetadata object or None if file doesn't exist
+        """
+        metadata_file = session_path / "metadata.json"
         
-        if file_size > 100:  # If file is larger than 100MB
-            self.log.info(f"  Large file ({file_size:.1f} MB), using chunked loading...")
+        if metadata_file.exists():
+            try:
+                return SessionMetadata.from_json_file(metadata_file)
+            except (FileNotFoundError, ValueError) as e:
+                self.log.warning(f"Failed to load metadata.json: {e}")
+                # Fall through to create minimal metadata
+        
+        # Create minimal metadata if file doesn't exist or is invalid
+        self.log.info("Creating minimal metadata from directory structure")
+        
+        camera_names = []
+        cameras_dir = session_path / "cameras"
+        if cameras_dir.exists():
+            camera_names = [d.name for d in cameras_dir.iterdir() if d.is_dir()]
+        
+        return SessionMetadata.create_minimal(session_path.name, camera_names)
+    
+    def _load_all_cameras(self, cameras_dir: Path) -> Dict:
+        """Load data for all cameras in the cameras directory.
+        
+        Args:
+            cameras_dir: Path to the cameras directory
             
-            chunks = []
-            for chunk in pd.read_csv(csv_path, chunksize=self.chunk_size * 100):
-                chunk['timestamp'] = chunk['timestamp'].astype(np.int64)
-                chunks.append(chunk)
+        Returns:
+            Dictionary with 'frames', 'metadata', and 'gaze_coords' keys
+        """
+        self.log.info(f"Loading data for all cameras...")
+        
+        all_frames = {}
+        all_metadata = {}
+        all_gaze_coords = {}
+        
+        camera_dirs = [d for d in cameras_dir.iterdir() if d.is_dir()]
+        
+        for camera_dir in sorted(camera_dirs):
+            camera_name = camera_dir.name
+            self.log.info(f"  Loading camera: {camera_name}")
             
-            df = pd.concat(chunks, ignore_index=True)
+            # Load frame metadata
+            metadata_file = camera_dir / "frame_metadata.csv"
+            metadata_df = self._load_csv(metadata_file, f"metadata for {camera_name}")
+            
+            # Validate required columns for frame metadata
+            required_metadata_cols = ['frameId', 'timestamp', 'posX', 'posY', 'posZ', 
+                                    'rotX', 'rotY', 'rotZ', 'rotW']
+            self._validate_csv_columns(metadata_df, required_metadata_cols, 
+                                     f"{camera_name}/frame_metadata.csv")
+            
+            all_metadata[camera_name] = metadata_df
+            
+            # Load frames (either from directory or extract from MLCF)
+            frames = self._load_camera_frames(camera_dir)
+            all_frames[camera_name] = frames
+            
+            # Load gaze screen coordinates if available
+            gaze_coords_file = camera_dir / "gaze_screen_coords.csv"
+            gaze_coords_df = self._load_csv_optional(gaze_coords_file, f"gaze coords for {camera_name}")
+            
+            # Validate gaze coordinates if present
+            if gaze_coords_df is not None:
+                required_gaze_cols = ['timestamp', 'frameId', 'screenPixelX', 'screenPixelY', 
+                                    'isTracking', 'gazeState']
+                self._validate_csv_columns(gaze_coords_df, required_gaze_cols, 
+                                         f"{camera_name}/gaze_screen_coords.csv")
+            
+            all_gaze_coords[camera_name] = gaze_coords_df
+        
+        return {
+            'frames': all_frames,
+            'metadata': all_metadata,
+            'gaze_coords': all_gaze_coords
+        }
+    
+    def _load_camera_frames(self, camera_dir: Path) -> Dict[str, bytes]:
+        """Load frames for a single camera (from directory or MLCF extraction).
+        
+        Args:
+            camera_dir: Path to the camera directory
+            
+        Returns:
+            Dictionary mapping frame IDs to JPEG bytes
+        """
+        frames_dir = camera_dir / "frames"
+        mlcf_file = camera_dir / "camera_frames.mlcf"
+        
+        # If frames directory exists, load from it
+        if frames_dir.exists():
+            return self._load_frames_from_directory(frames_dir)
+        
+        # If MLCF file exists, extract frames first
+        elif mlcf_file.exists():
+            self.log.info(f"  Extracting frames from {mlcf_file.name}...")
+            
+            extractor = MLCFExtractor(verbose=self.verbose)
+            success = extractor.extract(mlcf_file, frames_dir)
+            
+            if not success:
+                self.log.error(f"Failed to extract frames from {mlcf_file}")
+                return {}
+            
+            self.log.info(f"  MLCF extraction completed successfully")
+            return self._load_frames_from_directory(frames_dir)
+        
         else:
-            df = pd.read_csv(csv_path)
-            df['timestamp'] = df['timestamp'].astype(np.int64)
-        
-        self.log.info(f"  Loaded {len(df)} gaze samples")
-        
-        return df
+            self.log.warning(f"No frames or MLCF file found for camera {camera_dir.name}")
+            return {}
     
-    def _load_metadata(self, csv_path: Path) -> pd.DataFrame:
-        """Load frame metadata from CSV."""
-        self.log.info(f"Loading frame metadata...")
+    def _load_frames_from_directory(self, frames_dir: Path) -> Dict[str, bytes]:
+        """Load frame images from a directory as compressed JPEG bytes.
         
-        df = pd.read_csv(csv_path)
-        df['timestamp'] = df['timestamp'].astype(np.int64)
-        
-        self.log.info(f"  Loaded metadata for {len(df)} frames")
-        
-        return df
-    
-    def _load_frames(self, frames_dir: Path) -> Dict[str, bytes]:
-        """Load frame images as compressed JPEG bytes for memory efficiency."""
-        self.log.info(f"Loading frames from {frames_dir.name}/ (compressed)...")
+        Args:
+            frames_dir: Path to directory containing frame_*.jpg files
+            
+        Returns:
+            Dictionary mapping frame IDs to JPEG bytes
+        """
+        self.log.debug(f"  Loading frames from {frames_dir.name}/ (compressed)")
         
         frames = {}
-        frame_files = sorted(frames_dir.glob("frame_*.jpg"))
+        # Look for both "frame_*.jpg" and "*frame_*.jpg" patterns to handle camera prefixes
+        frame_files = sorted(list(frames_dir.glob("frame_*.jpg")) + list(frames_dir.glob("*frame_*.jpg")))
         
         for i, frame_path in enumerate(frame_files):
-            frame_id = frame_path.stem  # e.g., "frame_000001"
+            # Use the full filename as frame_id to match metadata CSV format
+            # (e.g., "CV_Real_002_frame_000001" matches frameId in CSV)
+            frame_id = frame_path.stem
             
             # Load as compressed bytes to save memory
             with open(frame_path, 'rb') as f:
                 frames[frame_id] = f.read()
             
             if self.verbose and (i + 1) % 100 == 0:
-                self.log.debug(f"  Loaded {i + 1}/{len(frame_files)} frames...")
+                self.log.debug(f"    Loaded {i + 1}/{len(frame_files)} frames...")
         
-        self.log.info(f"  Loaded {len(frames)} frames into memory")
-        
+        self.log.debug(f"  Loaded {len(frames)} frames into memory")
         return frames
     
-    def _load_imu_data(self, csv_path: Path) -> pd.DataFrame:
-        """Load IMU sensor data from CSV."""
-        self.log.info(f"Loading IMU data from {csv_path.name}...")
+    def _load_csv(self, csv_path: Path, description: str) -> pd.DataFrame:
+        """Load CSV data with proper data types and chunking for large files.
         
-        df = pd.read_csv(csv_path)
-        df['timestamp'] = df['timestamp'].astype(np.int64)
+        Args:
+            csv_path: Path to CSV file
+            description: Description for logging
+            
+        Returns:
+            DataFrame with timestamp column as int64
+        """
+        self.log.debug(f"  Loading {description} from {csv_path.name}...")
         
-        # Filter valid data if column exists
-        if 'hasValidData' in df.columns:
-            valid_df = df[df['hasValidData'] == True].copy()
-            self.log.info(f"  Loaded {len(df)} IMU samples ({len(valid_df)} valid)")
-            return valid_df
+        # Check file size for chunked loading
+        file_size = csv_path.stat().st_size / (1024 * 1024)  # Size in MB
         
-        self.log.info(f"  Loaded {len(df)} IMU samples")
+        if file_size > 100:  # If file is larger than 100MB
+            self.log.info(f"    Large file ({file_size:.1f} MB), using chunked loading...")
+            
+            chunks = []
+            for chunk in pd.read_csv(csv_path, chunksize=self.chunk_size * 100):
+                if 'timestamp' in chunk.columns:
+                    chunk['timestamp'] = chunk['timestamp'].astype(np.int64)
+                chunks.append(chunk)
+            
+            df = pd.concat(chunks, ignore_index=True)
+        else:
+            df = pd.read_csv(csv_path)
+            if 'timestamp' in df.columns:
+                df['timestamp'] = df['timestamp'].astype(np.int64)
         
+        self.log.debug(f"    Loaded {len(df)} rows")
         return df
     
-    def _extract_camera_poses(self, gaze_df: pd.DataFrame) -> pd.DataFrame:
-        """Extract unique camera poses from gaze data."""
-        self.log.info("Extracting camera poses from gaze data...")
+    def _load_csv_optional(self, csv_path: Path, description: str) -> Optional[pd.DataFrame]:
+        """Load optional CSV data.
         
-        # Camera pose columns in gaze data
-        camera_columns = [
-            'timestamp', 'frameId',
-            'cameraPositionX', 'cameraPositionY', 'cameraPositionZ',
-            'cameraRotationX', 'cameraRotationY', 'cameraRotationZ', 'cameraRotationW'
-        ]
-        
-        # Check which columns exist
-        existing_columns = [col for col in camera_columns if col in gaze_df.columns]
-        
-        if len(existing_columns) < 6:  # Need at least position and some rotation
-            self.log.warning("Incomplete camera data in gaze file")
-            return pd.DataFrame()
-        
-        # Extract unique camera poses (one per frame)
-        camera_df = gaze_df[existing_columns].drop_duplicates(subset=['frameId']).copy()
-        camera_df = camera_df.sort_values('timestamp').reset_index(drop=True)
-        
-        self.log.info(f"  Extracted {len(camera_df)} unique camera poses")
-        
-        return camera_df
-    
-    def load_frames_lazy(self, frames_dir: Path) -> Dict[str, Path]:
-        """Load frame paths only, not the actual image data (for very large datasets).
-        
+        Args:
+            csv_path: Path to CSV file
+            description: Description for logging
+            
         Returns:
-            Dictionary mapping frame IDs to file paths
+            DataFrame if file exists, None otherwise
         """
-        self.log.info(f"Loading frame paths from {frames_dir.name}/ (lazy mode)...")
+        if csv_path.exists():
+            return self._load_csv(csv_path, description)
+        else:
+            self.log.debug(f"  {description} not found (optional): {csv_path.name}")
+            return None
+    
+    def _validate_csv_columns(self, df: pd.DataFrame, required_columns: List[str], 
+                             csv_name: str) -> None:
+        """Validate that CSV contains required columns.
         
-        frame_paths = {}
-        frame_files = sorted(frames_dir.glob("frame_*.jpg"))
+        Args:
+            df: DataFrame to validate
+            required_columns: List of required column names
+            csv_name: Name of CSV file for error reporting
+            
+        Raises:
+            ValueError: If required columns are missing
+        """
+        missing_columns = [col for col in required_columns if col not in df.columns]
         
-        for frame_path in frame_files:
-            frame_id = frame_path.stem
-            frame_paths[frame_id] = frame_path
-        
-        self.log.info(f"  Found {len(frame_paths)} frame files")
-        
-        return frame_paths
+        if missing_columns:
+            available_cols = list(df.columns)
+            raise ValueError(
+                f"Missing required columns in {csv_name}: {missing_columns}\n"
+                f"Available columns: {available_cols}\n"
+                f"Please check that your data files match the expected format."
+            )

@@ -11,10 +11,13 @@ from src.analytics.base import AnalyticsPlugin
 
 
 class RerunVisualizer:
-    """Main visualization orchestrator using Rerun.
+    """Main visualization orchestrator using Rerun for multi-camera sessions.
     
-    This class coordinates the visualization of multi-sensor data
-    and analytics results in Rerun's 3D viewer.
+    This class coordinates the visualization of multi-sensor, multi-camera data
+    and analytics results in Rerun's 3D viewer. It shows:
+    - Primary camera in 3D world space with 3D gaze rays
+    - All cameras in separate 2D views with per-camera gaze overlays
+    - IMU sensor data and analytics results
     """
     
     def __init__(self, config: Optional[VisualizationConfig] = None):
@@ -155,7 +158,6 @@ class RerunVisualizer:
                 plugin_results = plugin.process(session, plugin_config)
                 results[plugin.name] = plugin_results
                 
-                # Print summary
                 summary = plugin.get_summary(plugin_results)
                 if summary:
                     print(f"    {summary}")
@@ -189,11 +191,11 @@ class RerunVisualizer:
             
             print(f"  Visualizing {sensor.name}...")
             try:
-                sensor.log_to_rerun(session, self.config.to_dict())
+                # Convert config to dict and add primary camera info
+                config_dict = self.config.to_dict()
+                config_dict['primary_camera'] = self.config.primary_camera
                 
-                # Special handling for gaze sensor - also log 2D points
-                if isinstance(sensor, GazeSensor):
-                    sensor.log_screen_gaze(session, self.config.to_dict())
+                sensor.log_to_rerun(session, config_dict)
                     
             except Exception as e:
                 print(f"    Error visualizing {sensor.name}: {e}")

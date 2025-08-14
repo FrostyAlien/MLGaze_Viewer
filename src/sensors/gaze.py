@@ -1,4 +1,4 @@
-"""Gaze sensor handler for MLGaze Viewer."""
+"""3D gaze sensor handler for MLGaze Viewer."""
 
 import pandas as pd
 import numpy as np
@@ -10,21 +10,29 @@ from src.core.coordinate_utils import unity_to_rerun_position
 
 
 class GazeSensor(BaseSensor):
-    """Handler for eye gaze data visualization in Rerun."""
+    """Handler for 3D world-space eye gaze data visualization in Rerun.
+    
+    This sensor handles the 3D gaze rays and hit points that are shared across
+    all cameras. Per-camera 2D gaze screen coordinates are handled by CameraSensor.
+    """
     
     def __init__(self, entity_path: str = "/world/gaze"):
-        """Initialize gaze sensor.
+        """Initialize 3D gaze sensor.
         
         Args:
             entity_path: Base entity path for gaze data in Rerun
         """
-        super().__init__(entity_path, "Gaze Sensor")
+        super().__init__(entity_path, "3D Gaze Sensor")
     
     def log_to_rerun(self, session: SessionData, config: Dict[str, Any]) -> None:
-        """Log gaze data to Rerun with rays, hit points, and trajectories.
+        """Log 3D gaze data to Rerun with rays, hit points, and trajectories.
+        
+        This method processes the sensors/gaze_data.csv data which contains 3D
+        world-space gaze vectors and hit positions that are independent of any
+        specific camera.
         
         Args:
-            session: SessionData containing gaze information
+            session: SessionData containing 3D gaze information
             config: Visualization configuration
         """
         if session.gaze.empty:
@@ -42,7 +50,6 @@ class GazeSensor(BaseSensor):
         for idx, row in session.gaze.iterrows():
             timestamp_ns = int(row['timestamp'])
             
-            # Set timeline
             rr.set_time("timestamp", timestamp=1e-9 * timestamp_ns)
             
             # Only log if tracking and has hit target
@@ -58,7 +65,6 @@ class GazeSensor(BaseSensor):
                 # Get color based on gaze state
                 color = self.get_color_for_state(row.get('gazeState', 'Unknown'))
                 
-                # Log gaze ray
                 rr.log(
                     f"{self.entity_path}/rays",
                     rr.Arrows3D(
@@ -69,7 +75,6 @@ class GazeSensor(BaseSensor):
                     )
                 )
                 
-                # Log hit point
                 rr.log(
                     f"{self.entity_path}/hits",
                     rr.Points3D(
@@ -130,46 +135,3 @@ class GazeSensor(BaseSensor):
                 static=True
             )
     
-    def log_screen_gaze(self, session: SessionData, config: Dict[str, Any]) -> None:
-        """Log 2D screen gaze points to camera image space.
-        
-        Args:
-            session: SessionData containing gaze information
-            config: Visualization configuration
-        """
-        if session.gaze.empty:
-            return
-        
-        # Get image dimensions from metadata
-        if session.metadata.empty:
-            return
-        
-        first_meta = session.metadata.iloc[0]
-        image_height = int(first_meta['height'])
-        
-        print(f"Logging 2D screen gaze points...")
-        
-        for idx, row in session.gaze.iterrows():
-            # Only log valid projections
-            if row.get('isValidProjection', False) and not pd.isna(row.get('screenPixelX')):
-                timestamp_ns = int(row['timestamp'])
-                rr.set_time("timestamp", timestamp=1e-9 * timestamp_ns)
-                
-                screen_x = row['screenPixelX']
-                screen_y = row['screenPixelY']
-                
-                # Apply Y-flip if configured
-                if config.get('test_y_flip', False):
-                    screen_y = image_height - screen_y
-                
-                color = self.get_color_for_state(row.get('gazeState', 'Unknown'))
-                
-                # Log 2D gaze point
-                rr.log(
-                    "/world/camera/image/gaze_2d",
-                    rr.Points2D(
-                        positions=[[screen_x, screen_y]],
-                        colors=[color],
-                        radii=10
-                    )
-                )

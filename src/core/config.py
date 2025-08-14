@@ -11,11 +11,12 @@ import json
 class VisualizationConfig:
     """Configuration settings for gaze visualization."""
     
-    # File paths
     input_directory: str = "input"
     output_directory: str = "output"
     
-    # Visualization settings
+    # Multi-camera settings
+    primary_camera: str = ""  # Selected primary camera for 3D visualization
+    
     enable_fade_trail: bool = True
     fade_duration: float = 5.0
     
@@ -35,7 +36,6 @@ class VisualizationConfig:
     test_y_flip: bool = False
     show_coordinate_indicators: bool = True
     
-    # Sensor settings
     show_imu_data: bool = True
     
     # Entity paths for Rerun
