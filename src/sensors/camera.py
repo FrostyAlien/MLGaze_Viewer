@@ -292,7 +292,7 @@ class CameraSensor(BaseSensor):
                         
                         # Log gaze point
                         rr.log(
-                            f"{entity_path}/gaze",
+                            f"{entity_path}/image/gaze",
                             rr.Points2D(
                                 positions=[[pixel_x, pixel_y]],
                                 colors=[color],
