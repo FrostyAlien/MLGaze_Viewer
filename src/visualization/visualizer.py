@@ -111,12 +111,17 @@ class RerunVisualizer:
         print(f"\nVisualizing session: {session.session_id}")
         print(f"Duration: {session.duration_minutes:.1f} minutes")
         
+        # Apply timestamp filtering based on sync mode
+        filtered_session = session.get_filtered_by_sync_mode()
+        if filtered_session != session:
+            print(f"Applied intersection mode filtering - effective duration: {filtered_session.duration_minutes:.1f} minutes")
+        
         # Run analytics if not provided
         if analytics_results is None and self.plugins:
-            analytics_results = self._run_analytics(session)
+            analytics_results = self._run_analytics(filtered_session)
         
         # Visualize sensor data
-        self._visualize_sensors(session)
+        self._visualize_sensors(filtered_session)
         
         # Visualize analytics results
         if analytics_results:

@@ -15,7 +15,7 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.widgets import (
-    Header, Footer, Static, Button, Input, Checkbox, Select, DirectoryTree
+    Header, Footer, Static, Button, Input, Checkbox, Select, DirectoryTree, RadioSet, RadioButton
 )
 from textual.screen import ModalScreen
 
@@ -389,6 +389,15 @@ class MLGazeConfigApp(App):
                     # Camera Selection Section (dynamic based on available cameras)
                     yield from self._create_camera_selection_section()
                     
+                    yield Static("Timestamp Synchronization", classes="section-title")
+                    with Container(classes="section-content"):
+                        yield Static("Choose how to handle sensors with different start/stop times:")
+                        yield RadioSet(
+                            RadioButton("Union: All data (first start to last stop)", value=True, id="union_mode"),
+                            RadioButton("Intersection: Synchronized data only (latest start to earliest stop)", id="intersection_mode"),
+                            id="timestamp_sync_mode"
+                        )
+                    
                     yield Static("Trail Effects", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Enable Trail Fade", value=True, id="fade_trail")
@@ -492,6 +501,16 @@ class MLGazeConfigApp(App):
         elif checkbox_id == "show_imu":
             self.config.show_imu_data = value
     
+    @on(RadioSet.Changed)
+    def radioset_changed(self, event: RadioSet.Changed) -> None:
+        """Handle radio button changes."""
+        if event.radio_set.id == "timestamp_sync_mode":
+            selected_button = event.pressed
+            if selected_button.id == "union_mode":
+                self.config.timestamp_sync_mode = "union"
+            elif selected_button.id == "intersection_mode":
+                self.config.timestamp_sync_mode = "intersection"
+    
     @on(Input.Changed)
     def input_changed(self, event: Input.Changed) -> None:
         """Handle input field changes."""
@@ -593,6 +612,10 @@ class MLGazeConfigApp(App):
         self.query_one("#window_trajectory", Checkbox).value = True
         self.query_one("#window_camera", Checkbox).value = True
         self.query_one("#show_imu", Checkbox).value = True
+        
+        # Reset radio buttons
+        self.query_one("#union_mode", RadioButton).value = True
+        self.query_one("#intersection_mode", RadioButton).value = False
     
     @on(Button.Pressed, "#browse_directory")
     def browse_directory(self) -> None:

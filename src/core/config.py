@@ -17,6 +17,9 @@ class VisualizationConfig:
     # Multi-camera settings
     primary_camera: str = ""  # Selected primary camera for 3D visualization
     
+    # Timestamp synchronization settings
+    timestamp_sync_mode: str = "union"  # "union" (first-to-last) or "intersection" (all-to-any)
+    
     enable_fade_trail: bool = True
     fade_duration: float = 5.0
     

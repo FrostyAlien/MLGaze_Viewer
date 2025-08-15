@@ -63,10 +63,12 @@ class SessionData:
     
     @property
     def duration(self) -> float:
-        """Get session duration in seconds."""
-        if self.gaze.empty:
+        """Get session duration in seconds based on the configured timestamp sync mode."""
+        end_ts = self.end_timestamp
+        start_ts = self.start_timestamp
+        if end_ts == 0 and start_ts == 0:
             return 0.0
-        return (self.gaze['timestamp'].max() - self.gaze['timestamp'].min()) / 1e9
+        return (end_ts - start_ts) / 1e9
     
     @property
     def duration_minutes(self) -> float:
@@ -153,7 +155,12 @@ class SessionData:
     
     @property
     def start_timestamp(self) -> int:
-        """Get session start timestamp in nanoseconds."""
+        """Get session start timestamp in nanoseconds.
+        
+        Behavior depends on timestamp_sync_mode config:
+        - "union": Start when first sensor starts (minimum timestamp)
+        - "intersection": Start when all sensors start (maximum timestamp)
+        """
         timestamps = []
         
         # Add gaze timestamps
@@ -173,12 +180,27 @@ class SessionData:
         # Add IMU timestamps
         if self.imu is not None and not self.imu.empty:
             timestamps.append(self.imu['timestamp'].min())
-            
-        return min(timestamps) if timestamps else 0
+        
+        if not timestamps:
+            return 0
+        
+        # Check timestamp synchronization mode from config
+        sync_mode = self.config.get('timestamp_sync_mode', 'union')
+        if sync_mode == 'intersection':
+            # Start when all sensors start (latest start time)
+            return max(timestamps)
+        else:
+            # Default: union mode - start when first sensor starts (earliest start time)
+            return min(timestamps)
     
     @property
     def end_timestamp(self) -> int:
-        """Get session end timestamp in nanoseconds."""
+        """Get session end timestamp in nanoseconds.
+        
+        Behavior depends on timestamp_sync_mode config:
+        - "union": End when last sensor stops (maximum timestamp)
+        - "intersection": End when any sensor stops (minimum timestamp)
+        """
         timestamps = []
         
         # Add gaze timestamps
@@ -198,8 +220,152 @@ class SessionData:
         # Add IMU timestamps
         if self.imu is not None and not self.imu.empty:
             timestamps.append(self.imu['timestamp'].max())
+        
+        if not timestamps:
+            return 0
             
-        return max(timestamps) if timestamps else 0
+        # Check timestamp synchronization mode from config
+        sync_mode = self.config.get('timestamp_sync_mode', 'union')
+        if sync_mode == 'intersection':
+            # End when any sensor stops (earliest end time)
+            return min(timestamps)
+        else:
+            # Default: union mode - end when last sensor stops (latest end time)
+            return max(timestamps)
+    
+    def validate_timestamp_range(self) -> bool:
+        """Validate that the timestamp range is valid for the current sync mode.
+        
+        Returns:
+            True if the range is valid, False if end < start
+        """
+        return self.start_timestamp <= self.end_timestamp
+    
+    def get_timestamp_sync_info(self) -> Dict[str, Any]:
+        """Get information about timestamp synchronization mode and its effects.
+        
+        Returns:
+            Dictionary with sync mode info and data availability
+        """
+        sync_mode = self.config.get('timestamp_sync_mode', 'union')
+        
+        # Collect all start and end timestamps
+        start_times = []
+        end_times = []
+        sensor_names = []
+        
+        if not self.gaze.empty:
+            start_times.append(self.gaze['timestamp'].min())
+            end_times.append(self.gaze['timestamp'].max())
+            sensor_names.append('gaze')
+        
+        for camera_name, metadata_df in self.camera_metadata.items():
+            if not metadata_df.empty and 'timestamp' in metadata_df.columns:
+                start_times.append(metadata_df['timestamp'].min())
+                end_times.append(metadata_df['timestamp'].max())
+                sensor_names.append(f'camera_{camera_name}')
+        
+        for camera_name, gaze_coords_df in self.gaze_screen_coords.items():
+            if gaze_coords_df is not None and not gaze_coords_df.empty and 'timestamp' in gaze_coords_df.columns:
+                start_times.append(gaze_coords_df['timestamp'].min())
+                end_times.append(gaze_coords_df['timestamp'].max())
+                sensor_names.append(f'gaze_coords_{camera_name}')
+        
+        if self.imu is not None and not self.imu.empty:
+            start_times.append(self.imu['timestamp'].min())
+            end_times.append(self.imu['timestamp'].max())
+            sensor_names.append('imu')
+        
+        if not start_times:
+            return {
+                'sync_mode': sync_mode,
+                'valid_range': True,
+                'sensors': [],
+                'start_timestamp': 0,
+                'end_timestamp': 0,
+                'effective_duration_s': 0,
+                'data_loss_s': 0
+            }
+        
+        min_start = min(start_times)
+        max_start = max(start_times)
+        min_end = min(end_times)
+        max_end = max(end_times)
+        
+        if sync_mode == 'intersection':
+            effective_start = max_start
+            effective_end = min_end
+        else:  # union
+            effective_start = min_start
+            effective_end = max_end
+        
+        union_duration = (max_end - min_start) / 1e9
+        effective_duration = max(0, (effective_end - effective_start) / 1e9)
+        data_loss = union_duration - effective_duration
+        
+        return {
+            'sync_mode': sync_mode,
+            'valid_range': effective_start <= effective_end,
+            'sensors': sensor_names,
+            'start_timestamp': effective_start,
+            'end_timestamp': effective_end,
+            'effective_duration_s': effective_duration,
+            'data_loss_s': data_loss,
+            'earliest_start': min_start,
+            'latest_start': max_start,
+            'earliest_end': min_end,
+            'latest_end': max_end
+        }
+    
+    def get_filtered_by_sync_mode(self) -> 'SessionData':
+        """Get session data filtered according to timestamp sync mode.
+        
+        Returns:
+            SessionData filtered based on the sync mode:
+            - Union mode: returns self (all data)
+            - Intersection mode: returns data only in overlapping time range
+        """
+        sync_mode = self.config.get('timestamp_sync_mode', 'union')
+        
+        if sync_mode == 'union':
+            return self  # No filtering needed for union mode
+        
+        # For intersection mode, check if range is valid
+        if not self.validate_timestamp_range():
+            print("WARNING: Intersection mode resulted in invalid range (end < start)")
+            print("Falling back to union mode to show all data")
+            return self
+        
+        # Calculate the intersection time range
+        sync_info = self.get_timestamp_sync_info()
+        intersection_start_ns = sync_info['start_timestamp']
+        intersection_end_ns = sync_info['end_timestamp']
+        
+        # Find the earliest possible start time (for union mode calculation)
+        union_start_ns = sync_info['earliest_start']
+        
+        # Calculate relative offsets for get_time_range
+        start_offset_s = (intersection_start_ns - union_start_ns) / 1e9
+        end_offset_s = (intersection_end_ns - union_start_ns) / 1e9
+        
+        # Create a temporary union-mode session to get the full range
+        temp_config = self.config.copy()
+        temp_config['timestamp_sync_mode'] = 'union'
+        temp_session = SessionData(
+            frames=self.frames,
+            camera_metadata=self.camera_metadata,
+            gaze_screen_coords=self.gaze_screen_coords,
+            gaze=self.gaze,
+            imu=self.imu,
+            metadata=self.metadata,
+            primary_camera=self.primary_camera,
+            session_id=f"{self.session_id}_intersection",
+            input_directory=self.input_directory,
+            config=temp_config
+        )
+        
+        # Filter to intersection range using the union-mode session as base
+        return temp_session.get_time_range(start_offset_s, end_offset_s)
     
     def get_time_range(self, start_s: float = None, end_s: float = None) -> 'SessionData':
         """Get a subset of the session data within a time range.
@@ -326,5 +492,13 @@ class SessionData:
             for state, count in state_dist.items():
                 percentage = (count / self.num_gaze_samples * 100) if self.num_gaze_samples > 0 else 0
                 lines.append(f"  - {state}: {count} ({percentage:.1f}%)")
+        
+        # Add timestamp synchronization info
+        sync_info = self.get_timestamp_sync_info()
+        lines.append(f"Timestamp sync: {sync_info['sync_mode']}")
+        if sync_info['data_loss_s'] > 0:
+            lines.append(f"Data loss: {sync_info['data_loss_s']:.1f}s due to {sync_info['sync_mode']} mode")
+        if not sync_info['valid_range']:
+            lines.append("Invalid timestamp range - check sensor synchronization")
         
         return "\n".join(lines)

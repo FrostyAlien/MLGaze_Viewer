@@ -23,7 +23,7 @@ class DataLoader:
         self.verbose = verbose
         self.log = logger.get_logger('DataLoader')
     
-    def load_session(self, session_dir: str) -> SessionData:
+    def load_session(self, session_dir: str, config: Dict = None) -> SessionData:
         """Load all sensor data from an organized session directory.
         
         Expected structure:
@@ -88,7 +88,8 @@ class DataLoader:
             metadata=metadata,
             primary_camera=primary_camera,
             session_id=metadata.session_id if metadata else session_path.name,
-            input_directory=str(session_path)
+            input_directory=str(session_path),
+            config=config or {}
         )
         
         self.log.info(f"Session loaded successfully:\n{session.summary()}")

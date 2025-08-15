@@ -13,15 +13,32 @@ Build a Rerun-based visualizer that displays ML2 eye gaze rays in 3D space and 2
 - **NEVER** creating monolithic scripts instead of modular plugins
 - **ALWAYS** reuse existing components from `src/` to avoid code duplication. 
 - **ALWAYS** notify the user if a reused method should be refactored when it starts breaking the Single Responsibility Principle.
+- **ALWAYS** use SessionData.primary_camera for 3D visualization
+- **ALWAYS** use organized session structure (cameras/, sensors/ directories)
+- **NEVER** mix 2D and 3D camera poses in same entity path
+
+## Multi-Camera Rules
+- **PRIMARY CAMERA**: Only one camera renders in 3D space at `/world/camera`
+- **ALL CAMERAS**: Get 2D views at `/cameras/{camera_name}/image`
+- **SELECTION**: Use Select widget for camera dropdown (NEVER RadioSet - allows multiple selection)
+- **VISUALIZATION**: Hide `/cameras` entity in Rerun 3D view to avoid clutter
+- **ENTITY PATHS**: `/world/camera` = 3D primary, `/cameras/{name}` = 2D views only
 
 ## Data Schema
 
-### Input Files
-- `gaze_data_*.csv`: 3D gaze vectors (origin, direction, hit position)
-- `gaze_screen_coords_*.csv`: 2D projections + camera transforms
-- `frames/*.jpg`: Extracted camera frames
-- `camera_data_*.csv`: Camera poses (position, rotation, intrinsics)
-- `imu_log_*.csv`: IMU sensor data
+### Organized Session Structure
+```
+/session_*/
+├── metadata.json         # Session metadata with camera list
+├── cameras/
+│   ├── {camera_name}/   # Each camera directory
+│   │   ├── frame_metadata.csv
+│   │   ├── gaze_screen_coords.csv (optional)
+│   │   └── frames/ or camera_frames.mlcf
+├── sensors/
+│   ├── gaze_data.csv    # 3D gaze data
+│   └── imu_data.csv     # IMU sensor data (optional)
+```
 
 ### Key Fields
 - Timestamps: Nanoseconds (requires int64)
@@ -30,11 +47,11 @@ Build a Rerun-based visualizer that displays ML2 eye gaze rays in 3D space and 2
 - Screen pixel: 2D coordinates in camera frame
 
 ## Data Flow Hierarchy
-1. Load data via `DataLoader` → `SessionData` container
-2. Process through sensor handlers (`GazeSensor`, `CameraSensor`, `IMUSensor`)
-3. Apply analytics plugins for analysis
-4. Visualize via `RerunVisualizer` with proper entity
-   paths
+1. Load organized session via `DataLoader` → `SessionData` container
+2. SessionData determines primary_camera from config or metadata
+3. CameraSensor logs primary to `/world/camera`, all cameras to `/cameras/{name}`
+4. Apply analytics plugins for analysis
+5. Visualize via `RerunVisualizer` with proper entity path separation
 
 ## Important Knowledge
 - Coordinates system: All data are recorded using Unity, which is  left-handed, Y-up world coordinate system.

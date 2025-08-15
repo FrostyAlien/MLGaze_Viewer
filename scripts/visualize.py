@@ -97,8 +97,8 @@ def main():
     loader = DataLoader(verbose=True)
     
     try:
-        # Load session data
-        session = loader.load_session(str(actual_input_dir))
+        # Load session data with configuration
+        session = loader.load_session(str(actual_input_dir), config.to_dict())
     except FileNotFoundError as e:
         print(f"Error: {e}")
         return
