@@ -23,6 +23,14 @@ from textual.screen import ModalScreen
 from src.core.config import VisualizationConfig
 from src.core import SessionMetadata
 
+# Import for object detection model availability
+try:
+    from src.analytics.object_detector import ObjectDetector
+    OBJECT_DETECTION_AVAILABLE = True
+except ImportError:
+    OBJECT_DETECTION_AVAILABLE = False
+    ObjectDetector = None
+
 
 class DirectoryBrowserScreen(ModalScreen[str]):
     """Modal screen for directory selection."""
@@ -353,6 +361,79 @@ class MLGazeConfigApp(App):
         self.cameras = []
         self.config.primary_camera = ""
     
+    def _update_object_detection_status(self) -> None:
+        """Update object detection status indicator."""
+        try:
+            status_widget = self.query_one("#object_detection_status", Static)
+            
+            if not self.config.enable_object_detection:
+                status_widget.update("Status: Disabled")
+                return
+            
+            if not OBJECT_DETECTION_AVAILABLE:
+                status_widget.update("Status: Dependencies missing")
+                return
+            
+            # Check model availability with download capability
+            if ObjectDetector:
+                custom_path = self.config.object_detection_custom_model_path if self.config.object_detection_model == "custom" else None
+                model_status = ObjectDetector.check_model_or_downloadable(self.config.object_detection_model, custom_path)
+                
+                if self.config.object_detection_model == "custom":
+                    if model_status == "local":
+                        status_widget.update(f"Status: Ready (custom model loaded, conf: {self.config.object_detection_confidence:.2f})")
+                    else:
+                        status_widget.update("Status: Custom model not found - check path")
+                elif model_status == "local":
+                    status_widget.update(f"Status: Ready (local {self.config.object_detection_model} model, conf: {self.config.object_detection_confidence:.2f})")
+                elif model_status == "downloadable":
+                    status_widget.update(f"Status: Ready (will download {self.config.object_detection_model} model on first use, conf: {self.config.object_detection_confidence:.2f})")
+                else:
+                    # Check what's available
+                    available_local = ObjectDetector.get_available_models()
+                    downloadable_models = [size for size in ObjectDetector.MODEL_FILES.keys() 
+                                         if size != "custom" and ObjectDetector.check_model_or_downloadable(size) == "downloadable"]
+                    
+                    if available_local:
+                        status_widget.update(f"Status: Model '{self.config.object_detection_model}' unavailable. Local models: {', '.join(available_local)}")
+                    elif downloadable_models:
+                        status_widget.update(f"Status: Will download on first use. Available: {', '.join(downloadable_models)}")
+                    else:
+                        status_widget.update("Status: No models available")
+            else:
+                status_widget.update("Status: ObjectDetector not available")
+                
+        except Exception as e:
+            # Silently handle status update errors
+            pass
+    
+    def _toggle_custom_model_inputs(self, enabled: bool) -> None:
+        """Show/hide custom model inputs based on model selection."""
+        try:
+            # Toggle custom path input
+            custom_path_input = self.query_one("#object_detection_custom_path", Input)
+            custom_path_input.disabled = not enabled
+            
+            # Toggle custom classes input
+            custom_classes_input = self.query_one("#object_detection_custom_classes", Input)
+            custom_classes_input.disabled = not enabled
+            
+            # Update visual styling
+            if enabled:
+                custom_path_input.add_class("enabled")
+                custom_classes_input.add_class("enabled")
+            else:
+                custom_path_input.remove_class("enabled")
+                custom_classes_input.remove_class("enabled")
+                # Clear values when disabled
+                custom_path_input.value = ""
+                custom_classes_input.value = ""
+                self.config.object_detection_custom_model_path = ""
+                self.config.object_detection_custom_classes = ""
+                
+        except Exception as e:
+            pass  # Silently handle UI errors
+    
     def _create_camera_selection_section(self):
         """Create the camera selection section (initially hidden)."""
         yield Static("Primary Camera (3D View)", classes="section-title", id="camera_section_title")
@@ -364,6 +445,110 @@ class MLGazeConfigApp(App):
                 prompt="Select a camera",
                 id="primary_camera"
             )
+    
+    def _create_object_detection_section(self):
+        """Create the object detection configuration section."""
+        yield Static("Object Detection", classes="section-title")
+        with Container(classes="section-content"):
+            # Enable/Disable checkbox
+            yield Checkbox("Enable Object Detection", value=False, id="enable_object_detection")
+            
+            if OBJECT_DETECTION_AVAILABLE and ObjectDetector:
+                # Get available models
+                available_models = ObjectDetector.get_available_models()
+                if not available_models:
+                    available_models = ["base"]  # Default fallback
+                
+                # Model selection
+                yield Static("Model Size:")
+                model_options = [
+                    ("Nano (Fastest)", "nano"),
+                    ("Small", "small"),
+                    ("Medium", "medium"),
+                    ("Base (Most Accurate)", "base"),
+                    ("Custom Fine-tuned", "custom")
+                ]
+                yield Select(
+                    options=model_options,
+                    value="base",
+                    id="object_detection_model"
+                )
+                
+                # Custom model path (initially hidden)
+                yield Static("Custom Model Path:", id="custom_model_label")
+                yield Input(
+                    placeholder="/path/to/custom-model.pth",
+                    value="",
+                    disabled=True,
+                    id="object_detection_custom_path"
+                )
+                
+                # Custom class names (initially hidden)
+                yield Static("Custom Classes (comma-separated):", id="custom_classes_label")
+                yield Input(
+                    placeholder="person,car,bike,dog,cat",
+                    value="",
+                    disabled=True,
+                    id="object_detection_custom_classes"
+                )
+                
+                # Confidence threshold
+                yield Static("Confidence Threshold (0.0 - 1.0):")
+                yield Input(
+                    placeholder="0.5",
+                    value="0.5",
+                    id="object_detection_confidence"
+                )
+                
+                # NMS threshold
+                yield Static("NMS Threshold (0.0 - 1.0):")
+                yield Input(
+                    placeholder="0.5",
+                    value="0.5",
+                    id="object_detection_nms_threshold"
+                )
+                
+                # Target classes filter
+                yield Static("Target Classes (comma-separated, empty = all):")
+                yield Input(
+                    placeholder="person,car,bike",
+                    value="",
+                    id="object_detection_target_classes"
+                )
+                
+                # Device selection
+                yield Static("Processing Device:")
+                device_options = [
+                    ("Auto (GPU if available)", "auto"),
+                    ("CPU Only", "cpu"),
+                    ("GPU (CUDA)", "cuda"),
+                    ("Apple Silicon (MPS)", "mps")
+                ]
+                yield Select(
+                    options=device_options,
+                    value="auto",
+                    id="object_detection_device"
+                )
+                
+                # Image Preprocessing Mode
+                yield Static("Preprocessing Mode:")
+                preprocessing_options = [
+                    ("Center Crop (Recommended)", "center_crop"),
+                    ("Padding (Preserve edges)", "padding"),
+                    ("None (Direct resize)", "none")
+                ]
+                yield Select(
+                    options=preprocessing_options,
+                    value="center_crop",
+                    id="object_detection_preprocessing_mode",
+                    tooltip="Center crop: Better accuracy, may lose edges. Padding: Keeps full image, may reduce accuracy"
+                )
+                
+                # Status indicator
+                yield Static("", id="object_detection_status")
+                
+            else:
+                yield Static("Object detection not available. Install required dependencies.", id="object_detection_error")
     
     def compose(self) -> ComposeResult:
         """Create the UI layout."""
@@ -442,6 +627,9 @@ class MLGazeConfigApp(App):
                         yield Checkbox("Test Y-Flip", value=False, id="y_flip")
                         yield Checkbox("Show Coordinate Indicators", value=True, id="coord_indicators")
                     
+                    # Object Detection Section
+                    yield from self._create_object_detection_section()
+                    
                     yield Static("IMU Sensor Data", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Show IMU Data", value=True, id="show_imu")
@@ -460,15 +648,33 @@ class MLGazeConfigApp(App):
         
         # Set focus to first input field
         self.query_one("#input_directory", Input).focus()
+        
+        # Update object detection status on startup
+        self._update_object_detection_status()
     
     
     @on(Select.Changed)
-    def camera_selection_changed(self, event: Select.Changed) -> None:
-        """Handle primary camera selection changes."""
-        if event.select.id == "primary_camera":
-            selected_camera = event.value
-            if selected_camera:  # Ensure a value was selected
-                self.config.primary_camera = selected_camera
+    def selection_changed(self, event: Select.Changed) -> None:
+        """Handle all select widget changes."""
+        select_id = event.select.id
+        selected_value = event.value
+        
+        if select_id == "primary_camera":
+            if selected_value:  # Ensure a value was selected
+                self.config.primary_camera = selected_value
+        elif select_id == "object_detection_model":
+            if selected_value:
+                self.config.object_detection_model = selected_value
+                # Toggle custom model inputs
+                self._toggle_custom_model_inputs(selected_value == "custom")
+                self._update_object_detection_status()
+        elif select_id == "object_detection_device":
+            if selected_value:
+                self.config.object_detection_device = selected_value
+                self._update_object_detection_status()
+        elif select_id == "object_detection_preprocessing_mode":
+            if selected_value:
+                self.config.object_detection_preprocessing_mode = selected_value
     
     @on(Checkbox.Changed)
     def checkbox_changed(self, event: Checkbox.Changed) -> None:
@@ -500,6 +706,9 @@ class MLGazeConfigApp(App):
             self.config.sliding_window_camera = value
         elif checkbox_id == "show_imu":
             self.config.show_imu_data = value
+        elif checkbox_id == "enable_object_detection":
+            self.config.enable_object_detection = value
+            self._update_object_detection_status()
     
     @on(RadioSet.Changed)
     def radioset_changed(self, event: RadioSet.Changed) -> None:
@@ -569,6 +778,41 @@ class MLGazeConfigApp(App):
                 else:
                     self.config.sliding_window_update_rate = 0.5
                     
+            elif input_id == "object_detection_confidence":
+                if value:
+                    confidence = float(value)
+                    if confidence < 0.0:
+                        self.show_warning("Confidence must be at least 0.0")
+                    elif confidence > 1.0:
+                        self.show_warning("Confidence must be at most 1.0")
+                    else:
+                        self.config.object_detection_confidence = confidence
+                        self._update_object_detection_status()
+                else:
+                    self.config.object_detection_confidence = 0.5
+                    
+            elif input_id == "object_detection_nms_threshold":
+                if value:
+                    nms_threshold = float(value)
+                    if nms_threshold < 0.0:
+                        self.show_warning("NMS threshold must be at least 0.0")
+                    elif nms_threshold > 1.0:
+                        self.show_warning("NMS threshold must be at most 1.0")
+                    else:
+                        self.config.object_detection_nms_threshold = nms_threshold
+                else:
+                    self.config.object_detection_nms_threshold = 0.5
+                    
+            elif input_id == "object_detection_custom_path":
+                self.config.object_detection_custom_model_path = value
+                self._update_object_detection_status()
+                
+            elif input_id == "object_detection_custom_classes":
+                self.config.object_detection_custom_classes = value
+                
+            elif input_id == "object_detection_target_classes":
+                self.config.object_detection_target_classes = value
+                    
         except ValueError as e:
             if "fade_duration" in input_id:
                 self.show_error("Value must be a number")
@@ -581,6 +825,9 @@ class MLGazeConfigApp(App):
         if not self.session_validated or not self.config.input_directory:
             self.show_error("Please select a valid session directory first")
             return
+        
+        # Sync object detection configuration
+        self.config.sync_object_detection_config()
         
         self.exit(self.config)
     
@@ -616,6 +863,22 @@ class MLGazeConfigApp(App):
         # Reset radio buttons
         self.query_one("#union_mode", RadioButton).value = True
         self.query_one("#intersection_mode", RadioButton).value = False
+        
+        # Reset object detection settings
+        try:
+            self.query_one("#enable_object_detection", Checkbox).value = False
+            self.query_one("#object_detection_model", Select).value = "base"
+            self.query_one("#object_detection_confidence", Input).value = "0.5"
+            self.query_one("#object_detection_nms_threshold", Input).value = "0.5"
+            self.query_one("#object_detection_device", Select).value = "auto"
+            self.query_one("#object_detection_preprocessing_mode", Select).value = "center_crop"
+            self.query_one("#object_detection_custom_path", Input).value = ""
+            self.query_one("#object_detection_custom_classes", Input).value = ""
+            self.query_one("#object_detection_target_classes", Input).value = ""
+            self._toggle_custom_model_inputs(False)
+            self._update_object_detection_status()
+        except Exception:
+            pass  # Silently handle if object detection widgets don't exist
     
     @on(Button.Pressed, "#browse_directory")
     def browse_directory(self) -> None:

@@ -186,6 +186,12 @@ exports/
 *.hdf5
 *.parquet
 
+# Large model files
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
 

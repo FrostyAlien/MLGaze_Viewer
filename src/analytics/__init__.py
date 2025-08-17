@@ -2,8 +2,9 @@
 
 from .base import AnalyticsPlugin
 from .aoi_analyzer import AOIAnalyzer
+from .object_detector import ObjectDetector
 
-__all__ = ["AnalyticsPlugin", "AOIAnalyzer"]
+__all__ = ["AnalyticsPlugin", "AOIAnalyzer", "ObjectDetector"]
 
 
 def load_plugins(plugin_names: list) -> list:
@@ -20,9 +21,9 @@ def load_plugins(plugin_names: list) -> list:
     for name in plugin_names:
         if name == "aoi_analyzer":
             plugins.append(AOIAnalyzer())
+        elif name == "object_detector":
+            plugins.append(ObjectDetector())
         # Add more plugins here as they are implemented
-        # elif name == "object_detector":
-        #     plugins.append(ObjectDetector())
         # elif name == "dwell_analyzer":
         #     plugins.append(DwellAnalyzer())
     

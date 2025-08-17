@@ -41,6 +41,28 @@ class VisualizationConfig:
     
     show_imu_data: bool = True
     
+    # Object detection settings
+    enable_object_detection: bool = False
+    object_detection_model: str = "base"  # nano, small, medium, base, custom
+    object_detection_confidence: float = 0.5  # 0.0-1.0
+    object_detection_device: str = "auto"  # auto, cpu, cuda, mps
+    
+    # Custom model settings
+    object_detection_custom_model_path: str = ""  # Path to custom fine-tuned model
+    object_detection_custom_classes: str = ""  # Comma-separated custom class names
+    
+    # Detection quality settings
+    object_detection_nms_threshold: float = 0.5  # Non-Maximum Suppression threshold
+    object_detection_target_classes: str = ""  # Comma-separated target classes (empty = all)
+    
+    # Image preprocessing settings (for accuracy improvement)
+    object_detection_preprocessing_mode: str = "center_crop"  # "none", "center_crop", "padding"
+    object_detection_preserve_aspect_ratio: bool = True  # For future use/reference
+    
+    # Object detection model management
+    prefer_local_models: bool = True  # Use local models first before downloading
+    auto_download_models: bool = True  # Allow automatic model downloading
+    
     # Entity paths for Rerun
     entity_paths: Dict[str, str] = field(default_factory=lambda: {
         "world": "/world",
@@ -65,9 +87,10 @@ class VisualizationConfig:
             "regions": []  # Will be populated at runtime
         },
         "object_detector": {
-            "model": "yolov8n",
-            "confidence": 0.5,
-            "device": "cpu"
+            "model_size": "base",
+            "confidence_threshold": 0.5,
+            "device": "auto",
+            "cache_detections": True
         },
         "dwell_analyzer": {
             "min_dwell_time": 500,  # milliseconds
@@ -121,3 +144,35 @@ class VisualizationConfig:
     def is_plugin_enabled(self, plugin_name: str) -> bool:
         """Check if a plugin is enabled."""
         return plugin_name in self.enabled_plugins
+    
+    def sync_object_detection_config(self) -> None:
+        """Sync object detection UI settings with plugin config."""
+        if "object_detector" not in self.plugin_configs:
+            self.plugin_configs["object_detector"] = {}
+        
+        # Parse custom classes and target classes
+        custom_classes = [cls.strip() for cls in self.object_detection_custom_classes.split(',') if cls.strip()] if self.object_detection_custom_classes else None
+        target_classes = [cls.strip() for cls in self.object_detection_target_classes.split(',') if cls.strip()] if self.object_detection_target_classes else None
+        
+        # Update plugin config from UI settings
+        self.plugin_configs["object_detector"].update({
+            "model_size": self.object_detection_model,
+            "confidence_threshold": self.object_detection_confidence,
+            "device": self.object_detection_device,
+            "custom_model_path": self.object_detection_custom_model_path if self.object_detection_model == "custom" else None,
+            "custom_class_names": custom_classes,
+            "nms_threshold": self.object_detection_nms_threshold,
+            "target_classes": target_classes,
+            "prefer_local_models": self.prefer_local_models,
+            "auto_download_models": self.auto_download_models,
+            "preprocessing_mode": self.object_detection_preprocessing_mode,
+            "preserve_aspect_ratio": self.object_detection_preserve_aspect_ratio
+        })
+        
+        # Update enabled plugins list
+        if self.enable_object_detection:
+            if "object_detector" not in self.enabled_plugins:
+                self.enabled_plugins.append("object_detector")
+        else:
+            if "object_detector" in self.enabled_plugins:
+                self.enabled_plugins.remove("object_detector")

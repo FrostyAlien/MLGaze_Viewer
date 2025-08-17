@@ -4,11 +4,17 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
+    "hdbscan>=0.8.40",
     "numpy>=2.3.2",
     "opencv-python>=4.11.0.86",
     "pandas>=2.3.1",
     "pandas-stubs==2.3.0.250703",
     "pyyaml>=6.0.2",
     "rerun-sdk>=0.24.0",
+    "rfdetr>=1.2.1",
+    "scikit-learn>=1.7.1",
+    "supervision>=0.26.1",
     "textual>=5.2.0",
+    "torch>=2.8.0",
+    "torchvision>=0.23.0",
 ]

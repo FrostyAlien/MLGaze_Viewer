@@ -9,6 +9,14 @@ from src.core import SessionData, VisualizationConfig
 from src.sensors import GazeSensor, CameraSensor, IMUSensor
 from src.analytics.base import AnalyticsPlugin
 
+# Import object detection for auto-loading
+try:
+    from src.analytics.object_detector import ObjectDetector
+    OBJECT_DETECTION_AVAILABLE = True
+except ImportError:
+    OBJECT_DETECTION_AVAILABLE = False
+    ObjectDetector = None
+
 
 class RerunVisualizer:
     """Main visualization orchestrator using Rerun for multi-camera sessions.
@@ -116,6 +124,9 @@ class RerunVisualizer:
         if filtered_session != session:
             print(f"Applied intersection mode filtering - effective duration: {filtered_session.duration_minutes:.1f} minutes")
         
+        # Auto-load object detection if enabled
+        self._auto_load_plugins()
+        
         # Run analytics if not provided
         if analytics_results is None and self.plugins:
             analytics_results = self._run_analytics(filtered_session)
@@ -135,6 +146,44 @@ class RerunVisualizer:
         print(f"  Final flush completed in {flush_time:.3f}s")
         
         print("Visualization complete! Use the Rerun viewer to explore the data.")
+    
+    def _auto_load_plugins(self) -> None:
+        """Auto-load plugins based on configuration settings."""
+        if not self.config:
+            return
+        
+        # Auto-load object detection if enabled
+        if self.config.enable_object_detection and OBJECT_DETECTION_AVAILABLE and ObjectDetector:
+            # Check if ObjectDetector is already added
+            has_object_detector = any(
+                isinstance(plugin, ObjectDetector) for plugin in self.plugins
+            )
+            
+            if not has_object_detector:
+                print("Auto-loading ObjectDetector plugin...")
+                try:
+                    # Create ObjectDetector with configuration from TUI
+                    # Parse custom classes and target classes
+                    custom_classes = [cls.strip() for cls in self.config.object_detection_custom_classes.split(',') if cls.strip()] if self.config.object_detection_custom_classes else None
+                    target_classes = [cls.strip() for cls in self.config.object_detection_target_classes.split(',') if cls.strip()] if self.config.object_detection_target_classes else None
+                    
+                    object_detector = ObjectDetector(
+                        model_size=self.config.object_detection_model,
+                        confidence_threshold=self.config.object_detection_confidence,
+                        device=self.config.object_detection_device,
+                        custom_model_path=self.config.object_detection_custom_model_path if self.config.object_detection_model == "custom" else None,
+                        custom_class_names=custom_classes,
+                        nms_threshold=self.config.object_detection_nms_threshold,
+                        target_classes=target_classes
+                    )
+                    
+                    self.add_plugin(object_detector)
+                    print(f"✓ ObjectDetector loaded with {self.config.object_detection_model} model")
+                    
+                except Exception as e:
+                    print(f"Warning: Failed to auto-load ObjectDetector: {e}")
+        elif self.config.enable_object_detection and not OBJECT_DETECTION_AVAILABLE:
+            print("Warning: Object detection enabled but dependencies not available")
     
     def _run_analytics(self, session: SessionData) -> Dict:
         """Run analytics plugins on session data.

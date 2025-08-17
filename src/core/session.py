@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from .metadata import SessionMetadata
+from .data_types import DetectedObject, ObjectInstance, GazeCluster
 
 
 @dataclass
@@ -34,10 +35,23 @@ class SessionData:
     input_directory: str = ""
     config: Dict[str, Any] = None
     
+    # Object detection and tracking data
+    detections: Dict[str, Dict[str, List[DetectedObject]]] = None  # {camera: {frame_id: [objects]}}
+    object_instances: Dict[str, ObjectInstance] = None  # {instance_id: ObjectInstance}
+    gaze_clusters: Dict[int, GazeCluster] = None  # {cluster_id: GazeCluster}
+    
     def __post_init__(self):
         """Initialize derived properties after dataclass creation."""
         if self.config is None:
             self.config = {}
+        
+        # Initialize object detection data structures
+        if self.detections is None:
+            self.detections = {}
+        if self.object_instances is None:
+            self.object_instances = {}
+        if self.gaze_clusters is None:
+            self.gaze_clusters = {}
         
         # Ensure timestamps are int64 for gaze data
         if not self.gaze.empty and 'timestamp' in self.gaze.columns:
@@ -502,3 +516,172 @@ class SessionData:
             lines.append("Invalid timestamp range - check sensor synchronization")
         
         return "\n".join(lines)
+    
+    # Object Detection and Tracking Methods
+    
+    def get_detections_for_frame(self, camera_name: str, frame_id: str) -> List[DetectedObject]:
+        """Retrieve cached detections for a specific frame.
+        
+        Args:
+            camera_name: Name of the camera
+            frame_id: Frame identifier
+            
+        Returns:
+            List of DetectedObject instances for the frame
+        """
+        return self.detections.get(camera_name, {}).get(frame_id, [])
+    
+    def get_detections_for_timestamp(self, camera_name: str, timestamp: int, tolerance_ms: int = 50) -> List[DetectedObject]:
+        """Get detections for the frame closest to a given timestamp.
+        
+        Args:
+            camera_name: Name of the camera
+            timestamp: Target timestamp in nanoseconds
+            tolerance_ms: Maximum time difference in milliseconds
+            
+        Returns:
+            List of DetectedObject instances for the closest frame
+        """
+        if camera_name not in self.detections:
+            return []
+        
+        tolerance_ns = tolerance_ms * 1e6
+        best_frame = None
+        min_diff = float('inf')
+        
+        # Find the frame with timestamp closest to target
+        for frame_id, detections in self.detections[camera_name].items():
+            if detections:  # Only consider frames with detections
+                frame_timestamp = detections[0].timestamp  # All detections in frame have same timestamp
+                diff = abs(frame_timestamp - timestamp)
+                if diff < min_diff and diff <= tolerance_ns:
+                    min_diff = diff
+                    best_frame = frame_id
+        
+        if best_frame is not None:
+            return self.detections[camera_name][best_frame]
+        return []
+    
+    def add_detection_results(self, camera_name: str, frame_detections: Dict[str, List[DetectedObject]]) -> None:
+        """Add detection results for a camera.
+        
+        Args:
+            camera_name: Name of the camera
+            frame_detections: Dictionary mapping frame_id to list of DetectedObject
+        """
+        if camera_name not in self.detections:
+            self.detections[camera_name] = {}
+        
+        self.detections[camera_name].update(frame_detections)
+    
+    def get_instance_by_id(self, instance_id: str) -> Optional[ObjectInstance]:
+        """Get object instance by ID.
+        
+        Args:
+            instance_id: Unique instance identifier
+            
+        Returns:
+            ObjectInstance if found, None otherwise
+        """
+        return self.object_instances.get(instance_id)
+    
+    def get_active_instances(self, timestamp: int, timeout_ms: int = 10000) -> List[ObjectInstance]:
+        """Get object instances that are active at a given timestamp.
+        
+        Args:
+            timestamp: Current timestamp in nanoseconds
+            timeout_ms: Instance timeout in milliseconds
+            
+        Returns:
+            List of active ObjectInstance objects
+        """
+        active_instances = []
+        for instance in self.object_instances.values():
+            if instance.is_active(timestamp, timeout_ms):
+                active_instances.append(instance)
+        return active_instances
+    
+    def add_object_instance(self, instance: ObjectInstance) -> None:
+        """Add or update an object instance.
+        
+        Args:
+            instance: ObjectInstance to add or update
+        """
+        self.object_instances[instance.instance_id] = instance
+    
+    def add_gaze_cluster(self, cluster: GazeCluster) -> None:
+        """Add a gaze cluster.
+        
+        Args:
+            cluster: GazeCluster to add
+        """
+        self.gaze_clusters[cluster.cluster_id] = cluster
+    
+    def get_gaze_cluster(self, cluster_id: int) -> Optional[GazeCluster]:
+        """Get gaze cluster by ID.
+        
+        Args:
+            cluster_id: Cluster identifier
+            
+        Returns:
+            GazeCluster if found, None otherwise
+        """
+        return self.gaze_clusters.get(cluster_id)
+    
+    def get_detection_statistics(self) -> Dict[str, Any]:
+        """Get statistics about object detection results.
+        
+        Returns:
+            Dictionary with detection statistics
+        """
+        stats = {
+            'total_cameras_with_detections': len(self.detections),
+            'total_frames_with_detections': 0,
+            'total_detected_objects': 0,
+            'detections_per_camera': {},
+            'class_distribution': {},
+            'confidence_stats': {
+                'mean': 0.0,
+                'min': 1.0,
+                'max': 0.0,
+                'std': 0.0
+            }
+        }
+        
+        all_confidences = []
+        
+        for camera_name, camera_detections in self.detections.items():
+            camera_stats = {
+                'frames_with_detections': len(camera_detections),
+                'total_objects': 0,
+                'classes': set()
+            }
+            
+            for frame_id, detections in camera_detections.items():
+                camera_stats['total_objects'] += len(detections)
+                stats['total_detected_objects'] += len(detections)
+                
+                for detection in detections:
+                    # Update class distribution
+                    class_name = detection.class_name
+                    if class_name not in stats['class_distribution']:
+                        stats['class_distribution'][class_name] = 0
+                    stats['class_distribution'][class_name] += 1
+                    camera_stats['classes'].add(class_name)
+                    
+                    # Collect confidence scores
+                    all_confidences.append(detection.confidence)
+            
+            camera_stats['unique_classes'] = len(camera_stats['classes'])
+            camera_stats['classes'] = list(camera_stats['classes'])
+            stats['detections_per_camera'][camera_name] = camera_stats
+            stats['total_frames_with_detections'] += camera_stats['frames_with_detections']
+        
+        # Calculate confidence statistics
+        if all_confidences:
+            stats['confidence_stats']['mean'] = float(np.mean(all_confidences))
+            stats['confidence_stats']['min'] = float(np.min(all_confidences))
+            stats['confidence_stats']['max'] = float(np.max(all_confidences))
+            stats['confidence_stats']['std'] = float(np.std(all_confidences))
+        
+        return stats
