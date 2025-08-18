@@ -3,6 +3,7 @@
 from typing import Dict, Any, Optional, List
 import rerun as rr
 from src.core import SessionData
+from src.utils.logger import MLGazeLogger
 
 
 class AnalyticsPlugin:
@@ -18,6 +19,14 @@ class AnalyticsPlugin:
         self.enabled = True
         self.results = None
         self.entity_path = f"/analytics/{name.lower().replace(' ', '_')}"
+        self._logger = None  # Lazy initialization
+    
+    @property
+    def logger(self):
+        """Get logger instance for this plugin."""
+        if self._logger is None:
+            self._logger = MLGazeLogger().get_logger(self.__class__.__name__)
+        return self._logger
     
     def get_dependencies(self) -> List[str]:
         """Return list of required plugin class names.
@@ -44,12 +53,24 @@ class AnalyticsPlugin:
         Returns:
             True if all required dependencies are satisfied
         """
+        missing_deps = []
+        failed_deps = []
+        
         for dep in self.get_dependencies():
             if dep not in available_results:
-                return False
-            # Check if dependency result contains error
-            if isinstance(available_results[dep], dict) and "error" in available_results[dep]:
-                return False
+                missing_deps.append(dep)
+            elif isinstance(available_results[dep], dict) and "error" in available_results[dep]:
+                failed_deps.append(dep)
+        
+        if missing_deps:
+            self.logger.error(f"Missing required dependencies: {missing_deps}")
+            return False
+        if failed_deps:
+            self.logger.error(f"Required dependencies failed: {failed_deps}")
+            return False
+        
+        if self.get_dependencies():
+            self.logger.debug(f"All required dependencies satisfied: {self.get_dependencies()}")
         return True
     
     def process(self, session: SessionData, config: Optional[Dict[str, Any]] = None) -> Dict:
@@ -94,6 +115,19 @@ class AnalyticsPlugin:
         Returns:
             True if data is valid, False otherwise
         """
+        # Basic validation that can be overridden by plugins
+        validation_issues = []
+        
+        if session.gaze.empty:
+            validation_issues.append("No gaze data available")
+        
+        if not session.frames:
+            validation_issues.append("No camera frames available")
+        
+        if validation_issues:
+            self.logger.warning(f"Data validation issues for {self.name}: {validation_issues}")
+            # Return True by default - let plugins decide if these are fatal
+        
         return True
     
     def get_required_columns(self) -> Dict[str, list]:

@@ -1,5 +1,6 @@
 """Plugin manager for orchestrating sequential plugin execution with dependency management."""
 
+import time
 from typing import Dict, List, Any
 from src.utils.logger import MLGazeLogger
 
@@ -134,9 +135,12 @@ class PluginManager:
                 enhanced_config["dependencies"] = {}
                 for dep_name in plugin.get_dependencies():
                     enhanced_config["dependencies"][dep_name] = self.execution_results[dep_name]
+                self.logger.debug(f"  Injected required dependencies: {plugin.get_dependencies()}")
             
             # Add optional dependency results if available
             optional_deps = plugin.get_optional_dependencies()
+            available_optional = []
+            missing_optional = []
             if optional_deps:
                 if "dependencies" not in enhanced_config:
                     enhanced_config["dependencies"] = {}
@@ -144,10 +148,20 @@ class PluginManager:
                     if (dep_name in self.execution_results and 
                         "error" not in self.execution_results[dep_name]):
                         enhanced_config["dependencies"][dep_name] = self.execution_results[dep_name]
+                        available_optional.append(dep_name)
+                    else:
+                        missing_optional.append(dep_name)
+                
+                if available_optional:
+                    self.logger.debug(f"  Injected optional dependencies: {available_optional}")
+                if missing_optional:
+                    self.logger.debug(f"  Skipping missing optional dependencies: {missing_optional}")
             
-            # Execute plugin
+            # Execute plugin with timing
             self.logger.info(f"Executing plugin: {plugin_name}")
+            start_time = time.time()
             plugin_results = plugin.process(session, enhanced_config)
+            execution_time = time.time() - start_time
             
             # Store results
             self.execution_results[plugin_name] = plugin_results
@@ -156,13 +170,21 @@ class PluginManager:
             if hasattr(session, 'set_plugin_result'):
                 session.set_plugin_result(plugin_name, plugin_results)
             
+            # Log execution results
+            self.logger.info(f"✓ {plugin_name} completed in {execution_time:.3f}s")
+            
             # Log summary
             summary = plugin.get_summary(plugin_results)
             if summary:
                 self.logger.info(f"  {summary}")
+            else:
+                # Basic results summary if plugin doesn't provide one
+                if isinstance(plugin_results, dict):
+                    result_keys = [k for k in plugin_results.keys() if k != 'session_data']
+                    self.logger.debug(f"  Results keys: {result_keys}")
                 
         except Exception as e:
-            self.logger.error(f"Plugin {plugin_name} execution failed: {e}")
+            self.logger.error(f"Plugin {plugin_name} execution failed: {e}", exc_info=True)
             self.execution_results[plugin_name] = {
                 "error": str(e),
                 "plugin_class": plugin.__class__.__name__

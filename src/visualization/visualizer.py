@@ -8,6 +8,7 @@ from pathlib import Path
 from src.core import SessionData, VisualizationConfig
 from src.sensors import GazeSensor, CameraSensor, IMUSensor
 from src.plugin_sys import AnalyticsPlugin
+from src.utils.logger import MLGazeLogger
 
 # Import object detection for auto-loading
 try:
@@ -38,6 +39,7 @@ class RerunVisualizer:
         self.sensors = []
         self.plugins = []
         self.recording_stream = None
+        self.logger = MLGazeLogger().get_logger("RerunVisualizer")
     
     def add_sensor(self, sensor) -> None:
         """Add a sensor to visualize.
@@ -247,19 +249,30 @@ class RerunVisualizer:
         Args:
             results: Dictionary of analytics results
         """
-        print("\nVisualizing analytics results...")
+        self.logger.info("Visualizing analytics results...")
+        
+        if not results:
+            self.logger.warning("No analytics results to visualize")
+            return
+        
+        self.logger.debug(f"Available results from: {list(results.keys())}")
         
         for plugin in self.plugins:
             plugin_class_name = plugin.__class__.__name__
+            plugin_display_name = plugin.name
+            
             if plugin_class_name not in results:
+                self.logger.warning(f"No results found for plugin {plugin_display_name} (class: {plugin_class_name})")
                 continue
             
             plugin_results = results[plugin_class_name]
             if 'error' in plugin_results:
+                self.logger.error(f"Plugin {plugin_display_name} has error in results: {plugin_results['error']}")
                 continue
             
-            print(f"  Visualizing {plugin.name} results...")
+            self.logger.info(f"Visualizing {plugin_display_name} results...")
             try:
                 plugin.visualize(plugin_results, self.recording_stream)
+                self.logger.info(f"✓ Successfully visualized {plugin_display_name}")
             except Exception as e:
-                print(f"    Error visualizing {plugin.name}: {e}")
+                self.logger.error(f"Failed to visualize {plugin_display_name}: {e}", exc_info=True)

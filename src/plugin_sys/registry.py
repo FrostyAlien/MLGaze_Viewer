@@ -3,6 +3,7 @@
 from typing import Dict, List, Set, Tuple
 from collections import defaultdict, deque
 
+from src.utils.logger import MLGazeLogger
 from .base import AnalyticsPlugin
 from .exceptions import CircularDependencyError, MissingDependencyError
 
@@ -15,6 +16,7 @@ class PluginRegistry:
         self.plugins: Dict[str, AnalyticsPlugin] = {}
         self.dependencies: Dict[str, List[str]] = {}
         self.optional_dependencies: Dict[str, List[str]] = {}
+        self.logger = MLGazeLogger().get_logger("PluginRegistry")
     
     def register(self, plugin: AnalyticsPlugin) -> None:
         """Register a plugin and build dependency graph.
@@ -26,20 +28,38 @@ class PluginRegistry:
             CircularDependencyError: If registering creates a cycle
         """
         plugin_name = plugin.__class__.__name__
+        plugin_display_name = plugin.name
+        
+        self.logger.info(f"Registering plugin: {plugin_name}")
+        if plugin_name != plugin_display_name:
+            self.logger.debug(f"  Display name: '{plugin_display_name}' (class: {plugin_name})")
         
         # Store plugin and its dependencies
         self.plugins[plugin_name] = plugin
-        self.dependencies[plugin_name] = plugin.get_dependencies()
-        self.optional_dependencies[plugin_name] = plugin.get_optional_dependencies()
+        dependencies = plugin.get_dependencies()
+        optional_dependencies = plugin.get_optional_dependencies()
+        
+        self.dependencies[plugin_name] = dependencies
+        self.optional_dependencies[plugin_name] = optional_dependencies
+        
+        # Log dependency information
+        if dependencies:
+            self.logger.info(f"  Required dependencies: {dependencies}")
+        if optional_dependencies:
+            self.logger.info(f"  Optional dependencies: {optional_dependencies}")
         
         # Check for circular dependencies after registration
+        self.logger.debug(f"Checking for circular dependencies after registering {plugin_name}")
         cycles = self.detect_circular_dependencies()
         if cycles:
             # Remove the plugin we just added to restore consistency
             del self.plugins[plugin_name]
             del self.dependencies[plugin_name]
             del self.optional_dependencies[plugin_name]
+            self.logger.error(f"Circular dependency detected when registering {plugin_name}: {cycles[0]}")
             raise CircularDependencyError(cycles[0])
+        
+        self.logger.info(f"✓ Successfully registered {plugin_name}")
     
     def unregister(self, plugin_name: str) -> None:
         """Remove a plugin from the registry.
@@ -93,9 +113,17 @@ class PluginRegistry:
         if requested_plugins is None:
             requested_plugins = list(self.plugins.keys())
         
+        self.logger.debug(f"Computing execution order for plugins: {requested_plugins}")
+        
         # Build dependency graph including all required dependencies
         plugins_to_include = set()
-        self._add_dependencies_recursive(requested_plugins, plugins_to_include)
+        try:
+            self._add_dependencies_recursive(requested_plugins, plugins_to_include)
+        except MissingDependencyError as e:
+            self.logger.error(f"Missing dependency when building execution order: {e}")
+            raise
+        
+        self.logger.debug(f"Plugins to include (with dependencies): {sorted(plugins_to_include)}")
         
         # Build graph for topological sort
         graph = defaultdict(list)
@@ -131,8 +159,10 @@ class PluginRegistry:
         # Check for cycles
         if len(result) != len(plugins_to_include):
             remaining = plugins_to_include - set(result)
+            self.logger.error(f"Circular dependency detected during topological sort. Remaining plugins: {remaining}")
             raise CircularDependencyError(list(remaining))
         
+        self.logger.info(f"Computed execution order: {' → '.join(result)}")
         return result
     
     def _add_dependencies_recursive(self, plugins: List[str], result_set: Set[str]) -> None:
