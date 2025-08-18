@@ -7,7 +7,7 @@ from pathlib import Path
 
 from src.core import SessionData, VisualizationConfig
 from src.sensors import GazeSensor, CameraSensor, IMUSensor
-from src.analytics.base import AnalyticsPlugin
+from src.plugin_sys import AnalyticsPlugin
 
 # Import object detection for auto-loading
 try:
