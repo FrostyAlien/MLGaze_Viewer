@@ -6,16 +6,22 @@ This is the authoritative guide for Magic Leap 2 gaze visualization using Rerun.
 Build a Rerun-based visualizer that displays ML2 eye gaze rays in 3D space and 2D camera frames with synchronized playback.
 
 ## Critical Architecture Rules
-- **ALWAYS** implement new features as plugins inheriting from `AnalyticsPlugin` or `BaseSensor` if the feature is sensor or analytics related.
-- **NEVER** add analytics code directly to core modules. - use `src/analytics/` or `plugins/`
-- **ALWAYS** use `DataLoader` → `SessionData` → `RerunVisualizer` data flow
+- **ALWAYS** implement new features as plugins inheriting from `src.plugin_system.base.AnalyticsPlugin` or `BaseSensor`
+- **NEVER** add analytics code directly to core modules - use `src/analytics/` or `plugins/`
+- **ALWAYS** use `DataLoader` → `SessionData` → `PluginManager` → `RerunVisualizer` data flow
 - **NEVER** bypass SessionData or directly manipulate CSVs
-- **NEVER** creating monolithic scripts instead of modular plugins
-- **ALWAYS** reuse existing components from `src/` to avoid code duplication. 
-- **ALWAYS** notify the user if a reused method should be refactored when it starts breaking the Single Responsibility Principle.
+- **NEVER** create monolithic scripts instead of modular plugins
+- **ALWAYS** reuse existing components from `src/` to avoid code duplication
 - **ALWAYS** use SessionData.primary_camera for 3D visualization
 - **ALWAYS** use organized session structure (cameras/, sensors/ directories)
 - **NEVER** mix 2D and 3D camera poses in same entity path
+
+## Plugin System Rules
+- **ALWAYS** declare dependencies using class names in get_dependencies() (e.g., "ObjectDetector", not "object_detector")
+- **ALWAYS** store results via session.set_plugin_result("PluginName", data)
+- **NEVER** create circular dependencies between plugins
+- **ALWAYS** check optional dependencies before using: if "Plugin" in config.get("dependencies", {})
+- **ALWAYS** handle missing dependencies gracefully with clear error messages
 
 ## Multi-Camera Rules
 - **PRIMARY CAMERA**: Only one camera renders in 3D space at `/world/camera`
@@ -72,6 +78,7 @@ Build a Rerun-based visualizer that displays ML2 eye gaze rays in 3D space and 2
 
 ## Recommended Practices
 - **When planning** ask user for clarification on any ambiguous requirements.
+- **NEVER** use print() for important logging.
 
 ## Documentation Rules
 - **NEVER** create documentation files unless explicitly requested
