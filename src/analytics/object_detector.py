@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from src.analytics.base import AnalyticsPlugin
 from src.core import SessionData, BoundingBox
-from src.core.data_types import DetectedObject, get_coco_class_name, get_coco_class_color, COCO_CLASSES
+from src.core.data_types import DetectedObject, get_coco_class_name, get_coco_class_id, get_coco_class_color, COCO_CLASSES
 from src.utils.logger import MLGazeLogger
 
 logger = MLGazeLogger().get_logger(__name__)
@@ -68,6 +68,7 @@ class ObjectDetector(AnalyticsPlugin):
         
         # Model and processing state
         self.model = None
+        self.model_class_names = {}  # Will store model's class_id -> class_name mapping
         self._processing_stats = {
             'frames_processed': 0,
             'total_detections': 0,
@@ -275,6 +276,10 @@ class ObjectDetector(AnalyticsPlugin):
 
             logger.info("Optimizing model for inference...")
             self._optimize_model_for_inference()
+            
+            # Store model's class names for mapping
+            self.model_class_names = self.model.class_names
+            logger.info(f"Loaded {len(self.model_class_names)} class mappings from model")
             
             logger.success(f"RF-DETR {self.model_size} model loaded successfully")
             
@@ -663,7 +668,16 @@ class ObjectDetector(AnalyticsPlugin):
                 for i in range(len(results.xyxy)):
                     bbox_coords = results.xyxy[i]  # [x1, y1, x2, y2]
                     confidence = results.confidence[i] if hasattr(results, 'confidence') else 1.0
-                    class_id = results.class_id[i] if hasattr(results, 'class_id') else 0
+                    rfdetr_class_id = int(results.class_id[i]) if hasattr(results, 'class_id') else 0
+                    
+                    # Get RF-DETR class name and map to COCO index
+                    class_name = self.model_class_names.get(rfdetr_class_id, "unknown")
+                    coco_class_id = get_coco_class_id(class_name)
+                    
+                    # Skip if unknown class
+                    if coco_class_id == -1:
+                        logger.warning(f"Unknown class: {class_name} (RF-DETR ID: {rfdetr_class_id})")
+                        continue
                     
                     # Convert to our format [x, y, width, height]
                     x1, y1, x2, y2 = bbox_coords
@@ -677,16 +691,13 @@ class ObjectDetector(AnalyticsPlugin):
                         category="detection"
                     )
                     
-                    # Get class name
-                    class_name = get_coco_class_name(int(class_id))
-                    
-                    # Create DetectedObject
+                    # Create DetectedObject with COCO class ID
                     detected_obj = DetectedObject(
                         frame_id=frame_id,
                         timestamp=timestamp,
                         bbox=bbox,
                         class_name=class_name,
-                        class_id=int(class_id),
+                        class_id=coco_class_id,  # Use COCO index, not RF-DETR ID
                         confidence=float(confidence)
                     )
                     
