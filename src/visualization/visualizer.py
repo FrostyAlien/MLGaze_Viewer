@@ -250,10 +250,11 @@ class RerunVisualizer:
         print("\nVisualizing analytics results...")
         
         for plugin in self.plugins:
-            if plugin.name not in results:
+            plugin_class_name = plugin.__class__.__name__
+            if plugin_class_name not in results:
                 continue
             
-            plugin_results = results[plugin.name]
+            plugin_results = results[plugin_class_name]
             if 'error' in plugin_results:
                 continue
             
