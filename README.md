@@ -59,16 +59,25 @@ uv run scripts/visualize.py
 
 ## Data Format
 
-The tool expects the following data structure in your input directory:
+The tool supports both modern organized session data and legacy formats for backwards compatibility.
 
 ```
 input/
-├── gaze_data_*.csv          # 3D gaze vectors
-├── gaze_screen_coords_*.csv # 2D screen projections
-├── camera_data_*.csv        # Camera poses
-├── imu_log_*.csv           # IMU sensor data
-└── frames/                 # Extracted camera frames
-    └── *.jpg
+└── session_xxxx/           # Session directory
+    ├── metadata.json                   # Session metadata with camera list
+    ├── cameras/
+    │   ├── rgb_camera/                 # Camera-specific directory
+    │   │   ├── camera_frames.mlcf      # Binary frame container
+    │   │   ├── frame_metadata.csv      # Frame timestamps & poses
+    │   │   └── gaze_screen_coords.csv  # Gaze in camera coordinates
+    │   └── mr_capture/                 # Multiple cameras supported
+    │       ├── camera_frames.mlcf
+    │       └── frame_metadata.csv
+    ├── sensors/
+    │   ├── gaze_data.csv              # 3D world-space gaze data
+    │   └── imu_data.csv               # IMU sensor data
+    └── logs/
+        └── session.log                # Session debug logs
 ```
 
 ## Features
@@ -77,16 +86,16 @@ input/
 - ✅ **Object Detection**: RF-DETR integration with configurable models (nano, small, medium, base)
 - ✅ **Plugin Dependency System**: DAG-based automatic execution ordering
 - ✅ **Multi-Camera Support**: Synchronized visualization across cameras
-- ✅ **Comprehensive Logging**: Debug, performance, and error tracking
 
 ### In Progress 🚧
 - 🚧 **Gaze-Object Interaction**: Mapping gaze to detected objects
 - 🚧 **3D Instance Tracking**: HDBSCAN clustering for object persistence
+- 🚧 **Sensor Recorder**: ML2 sensor recording application (in development)
 
 ### Planned 📋
-- [ ] **Sensor Recorder**: ML2 sensor recording application (in development)
 - [ ] **Heatmap Generation**: Gaze density visualization overlays for attention analysis
 - [ ] **Real-time Streaming**: Live data analysis support
+- [ ] **Advanced AOI Analysis**: Enhanced Area of Interest tracking and reporting
 
 ## Architecture
 
