@@ -35,6 +35,14 @@ cd MLGaze_Viewer
 uv sync
 ```
 
+### Optional: Object Detection Support
+
+To enable object detection features:
+```bash
+# RF-DETR models will be downloaded automatically on first use
+# Requires ~500MB for base model
+```
+
 ## Usage
 
 ### Basic Visualization
@@ -63,22 +71,39 @@ input/
     └── *.jpg
 ```
 
-## TODO
-- [ ] **Sensor Recorder**: The recoder for Magic Leap 2 sensors is still under development, which will release in the future to use with this viewer.
-- [ ] **Object Detection**: YOLO/SAM integration for automatic AOI detection in camera frames
+## Features
+
+### Completed ✅
+- ✅ **Object Detection**: RF-DETR integration with configurable models (nano, small, medium, base)
+- ✅ **Plugin Dependency System**: DAG-based automatic execution ordering
+- ✅ **Multi-Camera Support**: Synchronized visualization across cameras
+- ✅ **Comprehensive Logging**: Debug, performance, and error tracking
+
+### In Progress 🚧
+- 🚧 **Gaze-Object Interaction**: Mapping gaze to detected objects
+- 🚧 **3D Instance Tracking**: HDBSCAN clustering for object persistence
+
+### Planned 📋
+- [ ] **Sensor Recorder**: ML2 sensor recording application (in development)
 - [ ] **Heatmap Generation**: Gaze density visualization overlays for attention analysis
-- [ ] **Scanpath Analysis**: Sequential gaze pattern analysis and visualization
-- [ ] **Real-time Streaming**: Live data streaming support for online analysis
+- [ ] **Real-time Streaming**: Live data analysis support
 
 ## Architecture
 
-The project follows a modular plugin-based architecture:
+The project uses a sophisticated plugin-based architecture with automatic dependency management:
 
-- **DataLoader**: Handles CSV and frame data ingestion
-- **SessionData**: Central data container with unified timestamps
-- **Sensors**: Modular handlers for different data types (gaze, camera, IMU)
-- **Analytics Plugins**: Extensible analysis modules
-- **RerunVisualizer**: Main visualization orchestrator
+### Plugin Dependency System
+- **DAG-based Resolution**: Plugins declare dependencies, system automatically determines execution order
+- **Topological Sort**: Ensures plugins run in correct sequence based on dependencies
+- **Graceful Degradation**: Optional dependencies enhance functionality when available
+
+### Core Components
+- **DataLoader**: Handles organized session data with multi-camera support
+- **SessionData**: Central container with plugin results storage
+- **Plugin System** (`src/plugin_sys/`): Advanced dependency management and execution
+- **Analytics Plugins**: Extensible modules with dependency declarations
+- **RerunVisualizer**: Orchestrates sensors and plugins with automatic ordering
+
 
 ## Development
 
@@ -87,12 +112,21 @@ The project follows a modular plugin-based architecture:
 Create a new plugin by inheriting from `AnalyticsPlugin`:
 
 ```python
-from src.analytics.base import AnalyticsPlugin
+from src.plugin_sys.base import AnalyticsPlugin
+from typing import List, Dict, Any
 
 class CustomAnalyzer(AnalyticsPlugin):
-    def process(self, session_data):
+    def get_dependencies(self) -> List[str]:
+        return ["ObjectDetector"]  # Requires ObjectDetector to run first
+    
+    def get_optional_dependencies(self) -> List[str]:
+        return ["AOIAnalyzer"]  # Enhanced if AOI data available
+    
+    def process(self, session, config: Dict[str, Any]):
+        # Access dependency results
+        detections = config["dependencies"]["ObjectDetector"]
         # Your analysis logic here
-        pass
+        return results
 ```
 
 ### Project Structure
@@ -100,11 +134,15 @@ class CustomAnalyzer(AnalyticsPlugin):
 ```
 MLGaze_Viewer/
 ├── src/
-│   ├── core/           # Core data structures
+│   ├── core/           # Core data structures and session management
+│   ├── plugin_sys/     # Plugin infrastructure with DAG dependency management
 │   ├── sensors/        # Sensor data handlers
-│   ├── analytics/      # Analysis plugins
-│   ├── visualization/  # Rerun visualization
-│   └── ui/            # Terminal UI components
+│   ├── analytics/      # Analytics plugins (ObjectDetector, AOIAnalyzer, etc.)
+│   ├── visualization/  # Rerun visualization orchestrator
+│   ├── ui/            # Terminal UI components
+│   └── utils/         # Utilities (logging, data loading)
+├── models/            # ML models for object detection
+├── input/             # Session data input directory
 ├── plugins/           # Custom plugin modules
 └── scripts/          # Entry points
 ```
