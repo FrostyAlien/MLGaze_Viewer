@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import rerun as rr
 from typing import Dict, Any, List, Optional
-from src.analytics.base import AnalyticsPlugin
+from src.plugin_sys.base import AnalyticsPlugin
 from src.core import SessionData, BoundingBox
 from src.core.coordinate_utils import unity_to_rerun_position
 
@@ -21,6 +21,14 @@ class AOIAnalyzer(AnalyticsPlugin):
         """
         super().__init__("AOI Analyzer")
         self.regions = regions or []
+    
+    def get_dependencies(self) -> List[str]:
+        """Return list of required plugin class names."""
+        return []
+    
+    def get_optional_dependencies(self) -> List[str]:
+        """Return list of optional plugin class names."""
+        return []
     
     def add_region(self, region: BoundingBox) -> None:
         """Add a new AOI region.
@@ -79,6 +87,10 @@ class AOIAnalyzer(AnalyticsPlugin):
         results['summary'] = self._generate_summary(results['regions'])
         
         self.results = results
+        
+        # Store results in session for plugin system
+        session.set_plugin_result("AOIAnalyzer", results)
+        
         return results
     
     def _analyze_region(self, session: SessionData, region: BoundingBox) -> Dict:

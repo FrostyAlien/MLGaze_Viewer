@@ -1,6 +1,6 @@
 """Session data container for managing all sensor data in a recording session."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Any
 import pandas as pd
 import numpy as np
@@ -39,6 +39,9 @@ class SessionData:
     detections: Dict[str, Dict[str, List[DetectedObject]]] = None  # {camera: {frame_id: [objects]}}
     object_instances: Dict[str, ObjectInstance] = None  # {instance_id: ObjectInstance}
     gaze_clusters: Dict[int, GazeCluster] = None  # {cluster_id: GazeCluster}
+    
+    # Plugin system results storage
+    plugin_results: Dict[str, Any] = field(default_factory=dict)  # {plugin_name: results}
     
     def __post_init__(self):
         """Initialize derived properties after dataclass creation."""
@@ -685,3 +688,63 @@ class SessionData:
             stats['confidence_stats']['std'] = float(np.std(all_confidences))
         
         return stats
+    
+    # Plugin System Methods
+    
+    def get_plugin_result(self, plugin_name: str) -> Optional[Any]:
+        """Get results from a plugin by name.
+        
+        Args:
+            plugin_name: Name of the plugin (usually class name)
+            
+        Returns:
+            Plugin results if available, None otherwise
+        """
+        return self.plugin_results.get(plugin_name)
+    
+    def set_plugin_result(self, plugin_name: str, result: Any) -> None:
+        """Store plugin results.
+        
+        Args:
+            plugin_name: Name of the plugin (usually class name)
+            result: Results dictionary from plugin.process()
+        """
+        self.plugin_results[plugin_name] = result
+    
+    def has_plugin_result(self, plugin_name: str) -> bool:
+        """Check if plugin results are available.
+        
+        Args:
+            plugin_name: Name of the plugin
+            
+        Returns:
+            True if plugin results exist and don't contain errors
+        """
+        result = self.plugin_results.get(plugin_name)
+        if result is None:
+            return False
+        # Consider results with errors as not available
+        return not (isinstance(result, dict) and "error" in result)
+    
+    def clear_plugin_results(self) -> None:
+        """Clear all plugin results."""
+        self.plugin_results = {}
+    
+    def get_plugin_results_summary(self) -> Dict[str, str]:
+        """Get summary of all plugin results.
+        
+        Returns:
+            Dictionary mapping plugin names to status strings
+        """
+        summary = {}
+        for plugin_name, result in self.plugin_results.items():
+            if isinstance(result, dict):
+                if "error" in result:
+                    summary[plugin_name] = f"Error: {result['error']}"
+                elif "status" in result:
+                    summary[plugin_name] = result["status"]
+                else:
+                    summary[plugin_name] = "Completed"
+            else:
+                summary[plugin_name] = "Completed"
+        return summary

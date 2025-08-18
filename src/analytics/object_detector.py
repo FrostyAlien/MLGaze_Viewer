@@ -11,7 +11,7 @@ import rerun as rr
 from rfdetr import RFDETRBase, RFDETRNano, RFDETRSmall, RFDETRMedium
 from tqdm import tqdm
 
-from src.analytics.base import AnalyticsPlugin
+from src.plugin_sys.base import AnalyticsPlugin
 from src.core import SessionData, BoundingBox
 from src.core.data_types import DetectedObject, get_coco_class_name, get_coco_class_id, get_coco_class_color, COCO_CLASSES
 from src.utils.logger import MLGazeLogger
@@ -80,6 +80,14 @@ class ObjectDetector(AnalyticsPlugin):
         
         # Setup model management monkey-patch (once globally)
         self._setup_model_management()
+    
+    def get_dependencies(self) -> List[str]:
+        """Return list of required plugin class names."""
+        return []
+    
+    def get_optional_dependencies(self) -> List[str]:
+        """Return list of optional plugin class names."""
+        return []
     
     @classmethod
     def get_project_root(cls) -> Path:
@@ -555,6 +563,9 @@ class ObjectDetector(AnalyticsPlugin):
         
         # Include session data for visualization
         results['session_data'] = session
+        
+        # Store results in session for plugin system
+        session.set_plugin_result("ObjectDetector", results)
         
         return results
     

@@ -186,7 +186,7 @@ class RerunVisualizer:
             print("Warning: Object detection enabled but dependencies not available")
     
     def _run_analytics(self, session: SessionData) -> Dict:
-        """Run analytics plugins on session data.
+        """Run analytics plugins with dependency management.
         
         Args:
             session: SessionData to analyze
@@ -194,31 +194,18 @@ class RerunVisualizer:
         Returns:
             Dictionary of analytics results keyed by plugin name
         """
-        print("\nRunning analytics plugins...")
-        results = {}
+        # Import here to avoid circular imports
+        from src.plugin_sys import PluginManager
         
+        print("\nRunning analytics plugins with dependency management...")
+        
+        # Create plugin manager and register all plugins
+        manager = PluginManager()
         for plugin in self.plugins:
-            if not plugin.enabled:
-                continue
-            
-            print(f"  Running {plugin.name}...")
-            try:
-                # Get plugin-specific config
-                plugin_config = self.config.get_plugin_config(
-                    plugin.name.lower().replace(' ', '_')
-                )
-                
-                # Run analysis
-                plugin_results = plugin.process(session, plugin_config)
-                results[plugin.name] = plugin_results
-                
-                summary = plugin.get_summary(plugin_results)
-                if summary:
-                    print(f"    {summary}")
-                    
-            except Exception as e:
-                print(f"    Error in {plugin.name}: {e}")
-                results[plugin.name] = {'error': str(e)}
+            manager.register_plugin(plugin)
+        
+        # Execute plugins in dependency order
+        results = manager.execute_plugins(session, self.config.to_dict())
         
         return results
     
