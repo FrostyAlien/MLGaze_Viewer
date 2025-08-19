@@ -3,8 +3,9 @@
 from src.plugin_sys.base import AnalyticsPlugin
 from .aoi_analyzer import AOIAnalyzer
 from .object_detector import ObjectDetector
+from .gaze_object_interaction import GazeObjectInteraction
 
-__all__ = ["AnalyticsPlugin", "AOIAnalyzer", "ObjectDetector"]
+__all__ = ["AnalyticsPlugin", "AOIAnalyzer", "ObjectDetector", "GazeObjectInteraction"]
 
 
 def load_plugins(plugin_names: list) -> list:
@@ -24,6 +25,8 @@ def load_plugins(plugin_names: list) -> list:
             plugins.append(AOIAnalyzer())
         elif name == "ObjectDetector":
             plugins.append(ObjectDetector())
+        elif name == "GazeObjectInteraction":
+            plugins.append(GazeObjectInteraction())
         # Add more plugins here as they are implemented
     
     return plugins

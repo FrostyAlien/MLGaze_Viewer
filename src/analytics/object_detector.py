@@ -636,7 +636,7 @@ class ObjectDetector(AnalyticsPlugin):
                 continue
             
             # Run object detection
-            detections = self._detect_objects(image, frame_id, timestamp)
+            detections = self._detect_objects(image, frame_id, timestamp, camera_name)
             
             # Apply filtering if specified
             if self.target_classes:
@@ -653,7 +653,7 @@ class ObjectDetector(AnalyticsPlugin):
         return batch_detections
     
     def _detect_objects(self, image: Image.Image, frame_id: str, 
-                       timestamp: int) -> List[DetectedObject]:
+                       timestamp: int, camera_name: str) -> List[DetectedObject]:
         """Run object detection on a single image.
         
         Args:
@@ -704,6 +704,7 @@ class ObjectDetector(AnalyticsPlugin):
                     
                     # Create DetectedObject with COCO class ID
                     detected_obj = DetectedObject(
+                        camera_name=camera_name,
                         frame_id=frame_id,
                         timestamp=timestamp,
                         bbox=bbox,

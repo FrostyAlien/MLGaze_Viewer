@@ -1,14 +1,67 @@
 """Data type definitions for MLGaze Viewer sensors and analytics."""
 
-from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Tuple
 import numpy as np
 
 
+# Base Classes for Common Patterns
+
 @dataclass
-class GazeSample:
-    """Single gaze sample with 3D and 2D projection data."""
+class TimestampedData:
+    """Base class for all timestamped data."""
     timestamp: int  # Nanoseconds
+
+
+@dataclass
+class SpatialEntity:
+    """Base class for entities with spatial properties."""
+    camera_name: str
+    frame_id: str
+
+
+# Composite Key Classes for Multi-dimensional Data
+
+@dataclass(frozen=True)
+class ObjectKey:
+    """Immutable key for unique object identification across cameras."""
+    camera_name: str
+    class_name: str
+    instance_id: Optional[str] = None
+    
+    def __str__(self) -> str:
+        """String representation for logging and display."""
+        if self.instance_id:
+            return f"{self.class_name}[{self.instance_id}]@{self.camera_name}"
+        return f"{self.class_name}@{self.camera_name}"
+    
+    @property
+    def class_camera_key(self) -> Tuple[str, str]:
+        """Get (class_name, camera_name) tuple for compatibility."""
+        return (self.class_name, self.camera_name)
+
+
+@dataclass(frozen=True)
+class TransitionKey:
+    """Immutable key for object transitions."""
+    from_object: ObjectKey
+    to_object: ObjectKey
+    
+    def __str__(self) -> str:
+        """String representation for logging and display."""
+        return f"{self.from_object} → {self.to_object}"
+    
+    @property
+    def is_cross_camera(self) -> bool:
+        """Check if transition crosses camera boundaries."""
+        return self.from_object.camera_name != self.to_object.camera_name
+
+
+# Core Sensor Data Types
+
+@dataclass
+class GazeSample(TimestampedData):
+    """Single gaze sample with 3D and 2D projection data."""
     frame_id: str
     origin: np.ndarray  # 3D position [x, y, z]
     direction: np.ndarray  # 3D vector [x, y, z]
@@ -22,10 +75,8 @@ class GazeSample:
 
 
 @dataclass
-class CameraPose:
+class CameraPose(TimestampedData, SpatialEntity):
     """Camera position and orientation in world space."""
-    timestamp: int  # Nanoseconds
-    frame_id: str
     position: np.ndarray  # 3D position [x, y, z]
     rotation: np.ndarray  # Quaternion [x, y, z, w]
     
@@ -37,9 +88,8 @@ class CameraPose:
 
 
 @dataclass
-class IMUSample:
+class IMUSample(TimestampedData):
     """IMU sensor reading with accelerometer and gyroscope data."""
-    timestamp: int  # Nanoseconds
     accelerometer: np.ndarray  # [ax, ay, az] in m/s²
     gyroscope: np.ndarray  # [gx, gy, gz] in rad/s
     has_valid_data: bool = True
@@ -124,55 +174,167 @@ class Saccade:
 # Object Detection Data Types
 
 @dataclass
-class DetectedObject:
-    """2D detected object with metadata for object detection."""
-    frame_id: str
-    timestamp: int
+class DetectedObject(TimestampedData, SpatialEntity):
+    """Enhanced 2D detected object with camera context.
+    
+    Inherits timestamp and camera/frame context from base classes.
+    Separates detection properties from interaction metrics.
+    """
+    # Detection properties
     bbox: BoundingBox  # 2D bounding box in image coordinates
     class_name: str
     class_id: int
     confidence: float
+    
+    # Optional tracking
     instance_id: Optional[str] = None  # For tracking across frames
-    gaze_hits: int = 0  # Number of gaze samples hitting this object
-    first_gaze_time: Optional[int] = None  # Timestamp of first gaze contact
-    last_gaze_time: Optional[int] = None  # Timestamp of last gaze contact
-    total_dwell_ms: float = 0.0  # Total time gazed at this object
+    
+    # Extensible metadata
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
-        """Validate and initialize derived properties."""
+        """Validate detection properties."""
         if self.confidence < 0.0 or self.confidence > 1.0:
             raise ValueError(f"Confidence must be between 0 and 1, got {self.confidence}")
         if self.bbox.is_3d:  # Detection bboxes should be 2D
             raise ValueError("Detection bounding boxes must be 2D, not 3D")
         if len(self.bbox.bounds) != 4:
             raise ValueError(f"2D bounding box must have 4 elements, got {len(self.bbox.bounds)}")
+    
+    @property
+    def object_key(self) -> ObjectKey:
+        """Get ObjectKey for this detection."""
+        return ObjectKey(
+            camera_name=self.camera_name,
+            class_name=self.class_name,
+            instance_id=self.instance_id
+        )
+
+
+@dataclass
+class Visit:
+    """Individual visit to an object with precise timing."""
+    start_timestamp: int  # Nanoseconds
+    end_timestamp: Optional[int] = None  # Nanoseconds, None if ongoing
+    gaze_samples: List[int] = field(default_factory=list)  # Sample timestamps
+    fixation_sample_count: int = 0  # Number of fixation samples during this visit
+    
+    @property
+    def duration_ns(self) -> int:
+        """Get visit duration in nanoseconds."""
+        if self.end_timestamp is None:
+            return 0
+        return self.end_timestamp - self.start_timestamp
+    
+    @property
+    def duration_s(self) -> float:
+        """Get visit duration in seconds for reports."""
+        return self.duration_ns / 1e9
+    
+    @property
+    def is_ongoing(self) -> bool:
+        """Check if visit is still ongoing."""
+        return self.end_timestamp is None
 
 
 @dataclass 
 class ObjectInteractionMetrics:
-    """Metrics for gaze interaction with a specific object."""
-    object_id: str  # Unique identifier for the object
-    class_name: str
-    total_dwell_ms: float
-    fixation_count: int
-    first_look_timestamp: Optional[int]
-    last_look_timestamp: Optional[int]
-    entry_count: int  # Number of times gaze entered this object
-    exit_count: int  # Number of times gaze left this object
-    average_dwell_per_visit_ms: float = 0.0
-    gaze_samples: List[int] = None  # Timestamps of all gaze samples
-    gaze_state_distribution: Dict[str, int] = None  # Count by gaze state
+    """Enhanced metrics for gaze interaction with a specific object.
+    
+    Uses composite ObjectKey for proper identification and tracks
+    individual visits for accurate dwell time calculations.
+    """
+    # Identity using composite key
+    object_key: ObjectKey
+    
+    # Visit tracking (corrected approach)
+    visits: List[Visit] = field(default_factory=list)
+    
+    # Derived temporal metrics (calculated from visits)
+    total_dwell_ns: int = 0  # Nanoseconds - internal precision
+    first_look_timestamp: Optional[int] = None  # Nanoseconds
+    last_look_timestamp: Optional[int] = None   # Nanoseconds
+    
+    # Interaction counts (corrected)
+    visit_count: int = 0  # Number of discrete visits
+    total_entry_count: int = 0  # Total entries (including re-entries)
+    total_exit_count: int = 0   # Total exits
+    fixation_event_count: int = 0  # Number of fixation events (not samples)
+    
+    # Sample tracking
+    total_gaze_samples: int = 0  # Total samples on this object
+    gaze_state_distribution: Dict[str, int] = field(default_factory=dict)
+    
+    # Extensible metadata for plugins
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
-        """Initialize mutable default values."""
-        if self.gaze_samples is None:
-            self.gaze_samples = []
-        if self.gaze_state_distribution is None:
-            self.gaze_state_distribution = {}
+        """Calculate derived properties from visits."""
+        self._recalculate_metrics()
+    
+    def _recalculate_metrics(self):
+        """Recalculate all derived metrics from visit data."""
+        if not self.visits:
+            return
+            
+        # Calculate total dwell from all visits
+        self.total_dwell_ns = sum(visit.duration_ns for visit in self.visits if not visit.is_ongoing)
         
-        # Calculate average dwell per visit
-        if self.entry_count > 0:
-            self.average_dwell_per_visit_ms = self.total_dwell_ms / self.entry_count
+        # Update visit count
+        self.visit_count = len(self.visits)
+        
+        # Update first/last timestamps
+        all_timestamps = []
+        for visit in self.visits:
+            all_timestamps.extend(visit.gaze_samples)
+        
+        if all_timestamps:
+            self.first_look_timestamp = min(all_timestamps)
+            self.last_look_timestamp = max(all_timestamps)
+        
+        # Sum fixation samples
+        self.fixation_event_count = sum(visit.fixation_sample_count for visit in self.visits)
+        
+        # Sum total samples
+        self.total_gaze_samples = sum(len(visit.gaze_samples) for visit in self.visits)
+    
+    @property
+    def class_name(self) -> str:
+        """Get class name from object key for compatibility."""
+        return self.object_key.class_name
+    
+    @property
+    def camera_name(self) -> str:
+        """Get camera name from object key."""
+        return self.object_key.camera_name
+    
+    @property
+    def total_dwell_s(self) -> float:
+        """Get total dwell time in seconds for reports."""
+        return self.total_dwell_ns / 1e9
+    
+    @property
+    def average_dwell_per_visit_s(self) -> float:
+        """Get average dwell per visit in seconds."""
+        if self.visit_count == 0:
+            return 0.0
+        return self.total_dwell_s / self.visit_count
+    
+    @property
+    def revisit_rate(self) -> float:
+        """Calculate revisit rate (visits after first)."""
+        return max(0, self.visit_count - 1)
+    
+    def add_visit(self, visit: Visit):
+        """Add a new visit and recalculate metrics."""
+        self.visits.append(visit)
+        self._recalculate_metrics()
+    
+    def complete_current_visit(self, end_timestamp: int):
+        """Complete the ongoing visit if it exists."""
+        if self.visits and self.visits[-1].is_ongoing:
+            self.visits[-1].end_timestamp = end_timestamp
+            self._recalculate_metrics()
 
 
 @dataclass
@@ -357,3 +519,118 @@ def validate_detection_bbox(bbox: BoundingBox, image_width: int, image_height: i
             x + w <= image_width and
             y + h <= image_height and
             w > 0 and h > 0)
+
+
+# Analytics Aggregation Classes
+
+@dataclass
+class CameraMetrics:
+    """Metrics aggregated per camera for clear separation.
+    
+    Provides a structured way to organize all camera-specific metrics
+    without mixing data across cameras. Tracks transitions within camera.
+    """
+    camera_name: str
+    
+    # Object interaction data
+    object_metrics: Dict[str, ObjectInteractionMetrics] = field(default_factory=dict)
+    
+    # Transition tracking - corrected to show actual camera context
+    transition_matrix: Dict[Tuple[str, str], int] = field(default_factory=dict)  # (from_class, to_class) -> count
+    transition_details: List[Dict[str, Any]] = field(default_factory=list)  # Detailed transition records
+    
+    # Camera statistics
+    total_gaze_samples: int = 0
+    samples_on_objects: int = 0
+    unique_objects: int = 0
+    
+    # Frame interaction data
+    frame_interactions: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)  # frame_id -> interactions
+    
+    @property
+    def hit_rate(self) -> float:
+        """Calculate hit rate for this camera."""
+        if self.total_gaze_samples == 0:
+            return 0.0
+        return self.samples_on_objects / self.total_gaze_samples
+    
+    def get_objects_by_class(self, class_name: str) -> List[ObjectInteractionMetrics]:
+        """Get all objects of a specific class in this camera."""
+        return [metrics for metrics in self.object_metrics.values() 
+                if metrics.class_name == class_name]
+    
+    def add_transition(self, from_class: Optional[str], to_class: Optional[str], 
+                      timestamp: int, from_key: Optional[str] = None, to_key: Optional[str] = None):
+        """Add a transition between objects with proper camera context."""
+        # Handle None cases (no object)
+        from_display = from_class if from_class else "NO_OBJECT"
+        to_display = to_class if to_class else "NO_OBJECT"
+        
+        # Update transition matrix
+        key = (from_display, to_display)
+        if key not in self.transition_matrix:
+            self.transition_matrix[key] = 0
+        self.transition_matrix[key] += 1
+        
+        # Store detailed transition record
+        self.transition_details.append({
+            "from_class": from_display,
+            "to_class": to_display,
+            "timestamp": timestamp,
+            "camera_name": self.camera_name,  # Always this camera
+            "from_object_key": from_key,
+            "to_object_key": to_key
+        })
+
+
+@dataclass
+class SessionMetrics:
+    """Top-level session metrics maintaining camera separation.
+    
+    Provides aggregated view while keeping camera data distinct.
+    """
+    # Per-camera metrics (no merging)
+    camera_metrics: Dict[str, CameraMetrics] = field(default_factory=dict)
+    
+    # Session-wide configuration and statistics
+    configuration: Dict[str, Any] = field(default_factory=dict)
+    global_statistics: Dict[str, Any] = field(default_factory=dict)
+    
+    # Session context
+    session_id: str = ""
+    processing_time_s: float = 0.0
+    
+    @property
+    def total_cameras(self) -> int:
+        """Get total number of cameras processed."""
+        return len(self.camera_metrics)
+    
+    @property
+    def total_gaze_samples(self) -> int:
+        """Get total gaze samples across all cameras."""
+        return sum(cm.total_gaze_samples for cm in self.camera_metrics.values())
+    
+    @property
+    def total_samples_on_objects(self) -> int:
+        """Get total samples on objects across all cameras."""
+        return sum(cm.samples_on_objects for cm in self.camera_metrics.values())
+    
+    @property
+    def overall_hit_rate(self) -> float:
+        """Calculate overall hit rate across all cameras."""
+        total_samples = self.total_gaze_samples
+        if total_samples == 0:
+            return 0.0
+        return self.total_samples_on_objects / total_samples
+    
+    def get_camera_names(self) -> List[str]:
+        """Get list of camera names."""
+        return list(self.camera_metrics.keys())
+    
+    def get_all_objects(self) -> Dict[ObjectKey, ObjectInteractionMetrics]:
+        """Get all objects across cameras using ObjectKey."""
+        all_objects = {}
+        for camera_metrics in self.camera_metrics.values():
+            for metrics in camera_metrics.object_metrics.values():
+                all_objects[metrics.object_key] = metrics
+        return all_objects

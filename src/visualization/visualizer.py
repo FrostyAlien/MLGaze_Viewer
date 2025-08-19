@@ -13,10 +13,12 @@ from src.utils.logger import MLGazeLogger
 # Import object detection for auto-loading
 try:
     from src.analytics.object_detector import ObjectDetector
+    from src.analytics.gaze_object_interaction import GazeObjectInteraction
     OBJECT_DETECTION_AVAILABLE = True
 except ImportError:
     OBJECT_DETECTION_AVAILABLE = False
     ObjectDetector = None
+    GazeObjectInteraction = None
 
 
 class RerunVisualizer:
@@ -181,6 +183,21 @@ class RerunVisualizer:
                     
                     self.add_plugin(object_detector)
                     print(f"✓ ObjectDetector loaded with {self.config.object_detection_model} model")
+                    
+                    # Auto-load GazeObjectInteraction when object detection is enabled
+                    if GazeObjectInteraction:
+                        has_gaze_interaction = any(
+                            isinstance(plugin, GazeObjectInteraction) for plugin in self.plugins
+                        )
+                        
+                        if not has_gaze_interaction:
+                            gaze_interaction = GazeObjectInteraction(
+                                overlap_strategy="highest_confidence",
+                                dwell_interruption_ms=100.0,
+                                minimum_dwell_ms=50.0
+                            )
+                            self.add_plugin(gaze_interaction)
+                            print("✓ GazeObjectInteraction auto-loaded for gaze-object analysis")
                     
                 except Exception as e:
                     print(f"Warning: Failed to auto-load ObjectDetector: {e}")
