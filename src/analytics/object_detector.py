@@ -18,9 +18,6 @@ from src.utils.logger import MLGazeLogger
 
 logger = MLGazeLogger().get_logger(__name__)
 
-# Monkey-patch RF-DETR to use our custom model directory - applied once globally
-_model_management_patched = False
-
 
 class ObjectDetector(AnalyticsPlugin):
     """Object detection plugin using RF-DETR for real-time object detection.
@@ -77,9 +74,6 @@ class ObjectDetector(AnalyticsPlugin):
         
         # Validate model configuration
         self._validate_model_config()
-        
-        # Setup model management monkey-patch (once globally)
-        self._setup_model_management()
     
     def get_dependencies(self) -> List[str]:
         """Return list of required plugin class names."""
@@ -174,57 +168,31 @@ class ObjectDetector(AnalyticsPlugin):
                 available.append(model_size)
         return available
     
-    @classmethod
-    def _setup_model_management(cls) -> None:
-        """Monkey-patch RF-DETR to use our custom model directory."""
-        global _model_management_patched
-        if _model_management_patched:
-            return
+    def _download_model(self, model_size: str, target_path: Path) -> None:
+        """Download model to our models directory.
         
-        import rfdetr.main
-        original_download = rfdetr.main.download_pretrain_weights
+        Args:
+            model_size: Model size (nano, small, medium, base)
+            target_path: Path where model should be saved
+        """
+        from rfdetr.main import HOSTED_MODELS, download_pretrain_weights
+        from rfdetr.util.files import download_file
         
-        def custom_download_pretrain_weights(pretrain_weights, redownload=False):
-            """Override to use our custom model directory."""
-            # If None, let original handle it
-            if pretrain_weights is None:
-                return original_download(pretrain_weights, redownload)
-                
-            # Check if it's already an absolute path (our custom path)
-            if Path(pretrain_weights).is_absolute():
-                if Path(pretrain_weights).exists() and not redownload:
-                    return pretrain_weights
-                elif not Path(pretrain_weights).exists():
-                    # If it's our custom path but doesn't exist, download to it
-                    if str(Path(pretrain_weights).name) in rfdetr.main.HOSTED_MODELS:
-                        Path(pretrain_weights).parent.mkdir(parents=True, exist_ok=True)
-                        from rfdetr.util.files import download_file
-                        download_file(rfdetr.main.HOSTED_MODELS[Path(pretrain_weights).name], pretrain_weights)
-                        return pretrain_weights
-            
-            # Extract model size from filename (e.g., 'rf-detr-base.pth' -> 'base')
-            if pretrain_weights.startswith('rf-detr-') and pretrain_weights.endswith('.pth'):
-                model_size = pretrain_weights.replace('rf-detr-', '').replace('.pth', '')
-                custom_path = cls.get_model_path(model_size)
-                
-                # Check if model exists in our custom location
-                if custom_path.exists() and not redownload:
-                    return str(custom_path)
-                
-                # Download to our custom location
-                if pretrain_weights in rfdetr.main.HOSTED_MODELS:
-                    custom_path.parent.mkdir(parents=True, exist_ok=True)
-                    from rfdetr.util.files import download_file
-                    download_file(rfdetr.main.HOSTED_MODELS[pretrain_weights], str(custom_path))
-                    return str(custom_path)
-            
-            # Fallback to original behavior
-            return original_download(pretrain_weights, redownload)
+        model_filename = f"rf-detr-{model_size}.pth"
         
-        # Apply the monkey-patch
-        rfdetr.main.download_pretrain_weights = custom_download_pretrain_weights
-        _model_management_patched = True
-        logger.info("RF-DETR model management configured to use /models/object_detection/")
+        if model_filename in HOSTED_MODELS:
+            logger.info(f"Downloading {model_filename} to {target_path}")
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            download_file(HOSTED_MODELS[model_filename], str(target_path))
+        else:
+            # Fallback to RF-DETR's download mechanism
+            logger.info(f"Using RF-DETR download for {model_filename}")
+            downloaded_path = download_pretrain_weights(model_filename)
+            if downloaded_path and Path(downloaded_path).exists():
+                # Move to our directory
+                Path(downloaded_path).rename(target_path)
+            else:
+                raise ValueError(f"Failed to download model: {model_filename}")
     
     def _validate_model_config(self) -> None:
         """Validate model configuration and setup."""
@@ -279,7 +247,7 @@ class ObjectDetector(AnalyticsPlugin):
         logger.info(f"Loading RF-DETR {self.model_size} model...")
         
         try:
-            # Create model instance - monkey-patch handles path management
+            # Create model instance
             self.model = self._create_model_instance()
 
             logger.info("Optimizing model for inference...")
@@ -299,7 +267,7 @@ class ObjectDetector(AnalyticsPlugin):
                 fallback_model = available_models[0]
                 logger.warning(f"Falling back to available model: {fallback_model}")
                 self.model_size = fallback_model
-                self._load_model()  # Recursive call with fallback
+                self._load_model()
             else:
                 raise
     
@@ -310,19 +278,38 @@ class ObjectDetector(AnalyticsPlugin):
         
         # Get the local model path
         model_path = self.get_model_path(self.model_size)
-        pretrain_weights = str(model_path) if model_path.exists() else None
         
-        # Pass explicit pretrain_weights path to force using our models directory
-        if self.model_size == "nano":
-            return RFDETRNano(pretrain_weights=pretrain_weights)
-        elif self.model_size == "small":
-            return RFDETRSmall(pretrain_weights=pretrain_weights)
-        elif self.model_size == "medium":
-            return RFDETRMedium(pretrain_weights=pretrain_weights)
-        elif self.model_size == "base":
-            return RFDETRBase(pretrain_weights=pretrain_weights)
-        else:
+        # Ensure model exists in our directory
+        if not model_path.exists():
+            logger.info(f"Model not found at {model_path}, downloading...")
+            self._download_model(self.model_size, model_path)
+        
+        # Always use explicit absolute path - never None!
+        pretrain_weights = str(model_path)
+        logger.info(f"Loading {self.model_size} model from: {pretrain_weights}")
+
+        model_classes = {
+            "nano": RFDETRNano,
+            "small": RFDETRSmall,
+            "medium": RFDETRMedium,
+            "base": RFDETRBase
+        }
+        
+        model_class = model_classes.get(self.model_size)
+        if not model_class:
             raise ValueError(f"Unknown model size: {self.model_size}")
+        
+        try:
+            model = model_class(pretrain_weights=pretrain_weights)
+
+            if model.model is None:
+                raise RuntimeError(f"Model creation failed for {self.model_size}")
+            
+            return model
+            
+        except Exception as e:
+            logger.error(f"Failed to create {self.model_size} model: {e}")
+            raise
     
     def _create_custom_model_instance(self):
         """Create RF-DETR instance with custom fine-tuned model."""
