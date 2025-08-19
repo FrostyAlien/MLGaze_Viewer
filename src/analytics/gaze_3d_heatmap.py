@@ -49,6 +49,12 @@ class Gaze3DHeatmap(AnalyticsPlugin):
         self.voxel_size = 0.1  # Default 10cm
         self.min_density = 5  # Default min 5 points to show
         self.show_heatmap = True  # Default show heatmap
+        self.use_boxes = None
+        self.opacity_min = 0.3  # Default min opacity
+        self.opacity_max = 1.0  # Default max opacity
+        self.fill_mode = 'solid'  # Default fill mode
+        self.filter_enabled = False  # Default filtering off
+        self.gaze_states_filter: List[str] = []  # Default no filter
     
     def get_dependencies(self) -> List[str]:
         """No dependencies - works directly with gaze data."""
@@ -91,8 +97,13 @@ class Gaze3DHeatmap(AnalyticsPlugin):
         self.opacity_max = plugin_config.get('opacity_max', 1.0)
         self.fill_mode = plugin_config.get('fill_mode', 'solid')
         
+        # Gaze state filtering parameters
+        self.filter_enabled = plugin_config.get('filter_enabled', False)
+        self.gaze_states_filter = plugin_config.get('gaze_states_filter', [])
+        
+        filter_info = f", filter_states={self.gaze_states_filter}" if self.filter_enabled else ""
         self.logger.info(f"Processing with voxel_size={self.voxel_size}m, "
-                        f"min_density={self.min_density}, use_boxes={self.use_boxes}")
+                        f"min_density={self.min_density}, use_boxes={self.use_boxes}{filter_info}")
         
         if session.gaze.empty:
             self.logger.warning("No gaze data available for heatmap generation")
@@ -146,6 +157,14 @@ class Gaze3DHeatmap(AnalyticsPlugin):
             (gaze_df['isTracking'] == True) & 
             (gaze_df['hasHitTarget'] == True)
         ]
+        
+        # Apply gaze state filter if enabled
+        if self.filter_enabled and self.gaze_states_filter:
+            if 'gazeState' in valid_gaze.columns:
+                valid_gaze = valid_gaze[valid_gaze['gazeState'].isin(self.gaze_states_filter)]
+                self.logger.info(f"Filtering for gaze states: {self.gaze_states_filter}")
+            else:
+                self.logger.warning("gazeState column not found, skipping state filtering")
         
         if len(valid_gaze) == 0:
             self.logger.warning("No valid gaze hit points found")
@@ -203,7 +222,10 @@ class Gaze3DHeatmap(AnalyticsPlugin):
                 'total_voxels': 0,
                 'max_density': 0,
                 'hotspot_voxels': [],
-                'coverage_volume': 0.0
+                'coverage_volume': 0.0,
+                'total_points': len(self.gaze_points_3d),
+                'voxel_size': self.voxel_size,
+                'min_density': self.min_density
             }
         
         # Filter voxels by minimum density

@@ -106,7 +106,9 @@ class VisualizationConfig:
             "use_boxes": True,  # Use Boxes3D instead of Points3D
             "opacity_min": 0.3,  # Minimum opacity
             "opacity_max": 1.0,  # Maximum opacity
-            "fill_mode": "solid"  # solid or wireframe
+            "fill_mode": "solid",  # solid or wireframe
+            "filter_enabled": False,  # Enable gaze state filtering
+            "gaze_states_filter": []  # List of gaze states to include (empty = all)
         },
         "Gaze3DClustering": {
             "enabled": True,
@@ -115,7 +117,9 @@ class VisualizationConfig:
             "epsilon_m": 0.15,  # Max distance in meters
             "show_bounds": True,  # Show bounding boxes
             "bound_opacity": 0.3,  # Bounding box opacity
-            "point_opacity": 0.8  # Cluster points opacity
+            "point_opacity": 0.8,  # Cluster points opacity
+            "filter_enabled": False,  # Enable gaze state filtering
+            "gaze_states_filter": []  # List of gaze states to include (empty = all)
         }
     })
     
