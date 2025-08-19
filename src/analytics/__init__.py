@@ -4,8 +4,17 @@ from src.plugin_sys.base import AnalyticsPlugin
 from .aoi_analyzer import AOIAnalyzer
 from .object_detector import ObjectDetector
 from .gaze_object_interaction import GazeObjectInteraction
+from .gaze_3d_heatmap import Gaze3DHeatmap
+from .gaze_3d_clustering import Gaze3DClustering
 
-__all__ = ["AnalyticsPlugin", "AOIAnalyzer", "ObjectDetector", "GazeObjectInteraction"]
+__all__ = [
+    "AnalyticsPlugin", 
+    "AOIAnalyzer", 
+    "ObjectDetector", 
+    "GazeObjectInteraction",
+    "Gaze3DHeatmap",
+    "Gaze3DClustering"
+]
 
 
 def load_plugins(plugin_names: list) -> list:
@@ -27,6 +36,10 @@ def load_plugins(plugin_names: list) -> list:
             plugins.append(ObjectDetector())
         elif name == "GazeObjectInteraction":
             plugins.append(GazeObjectInteraction())
+        elif name == "Gaze3DHeatmap":
+            plugins.append(Gaze3DHeatmap())
+        elif name == "Gaze3DClustering":
+            plugins.append(Gaze3DClustering())
         # Add more plugins here as they are implemented
     
     return plugins

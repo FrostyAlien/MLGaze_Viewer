@@ -6,7 +6,7 @@ This is the authoritative guide for Magic Leap 2 gaze visualization using Rerun.
 Build a Rerun-based visualizer that displays ML2 eye gaze rays in 3D space and 2D camera frames with synchronized playback.
 
 ## Critical Architecture Rules
-- **ALWAYS** implement new features as plugins inheriting from `src.plugin_system.base.AnalyticsPlugin` or `BaseSensor`
+- **ALWAYS** implement new features as plugins inheriting from `src.plugin_sys.base.AnalyticsPlugin` or `BaseSensor`
 - **NEVER** add analytics code directly to core modules - use `src/analytics/` or `plugins/`
 - **ALWAYS** use `DataLoader` → `SessionData` → `PluginManager` → `RerunVisualizer` data flow
 - **NEVER** bypass SessionData or directly manipulate CSVs

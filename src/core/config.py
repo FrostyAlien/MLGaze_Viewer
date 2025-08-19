@@ -74,7 +74,9 @@ class VisualizationConfig:
     
     # Analytics settings
     enabled_plugins: List[str] = field(default_factory=lambda: [
-        "fixation_detector"
+        "fixation_detector",
+        "Gaze3DHeatmap",
+        "Gaze3DClustering"
     ])
     
     plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
@@ -95,6 +97,25 @@ class VisualizationConfig:
         "dwell_analyzer": {
             "min_dwell_time": 500,  # milliseconds
             "merge_threshold": 50  # milliseconds
+        },
+        "Gaze3DHeatmap": {
+            "enabled": True,
+            "voxel_size": 0.1,  # 10cm voxels
+            "min_density": 5,  # Min points per voxel to display
+            "show_heatmap": True,  # Toggle visualization
+            "use_boxes": True,  # Use Boxes3D instead of Points3D
+            "opacity_min": 0.3,  # Minimum opacity
+            "opacity_max": 1.0,  # Maximum opacity
+            "fill_mode": "solid"  # solid or wireframe
+        },
+        "Gaze3DClustering": {
+            "enabled": True,
+            "min_cluster_size": 30,  # Min points to form cluster
+            "min_samples": 5,  # Core point density requirement
+            "epsilon_m": 0.15,  # Max distance in meters
+            "show_bounds": True,  # Show bounding boxes
+            "bound_opacity": 0.3,  # Bounding box opacity
+            "point_opacity": 0.8  # Cluster points opacity
         }
     })
     

@@ -446,6 +446,94 @@ class MLGazeConfigApp(App):
                 id="primary_camera"
             )
     
+    def _create_spatial_analysis_sections(self):
+        """Create the spatial analysis configuration sections."""
+        # 3D Heatmap Section
+        yield Static("3D Gaze Heatmap", classes="section-title")
+        with Container(classes="section-content"):
+            yield Checkbox("Enable 3D Heatmap", value=True, id="enable_heatmap")
+            yield Checkbox("Show Heatmap Visualization", value=True, id="show_heatmap")
+            yield Checkbox("Use Boxes (vs Points)", value=True, id="heatmap_use_boxes")
+            
+            yield Static("Voxel Size (meters):")
+            yield Input(
+                placeholder="0.1",
+                value="0.1",
+                id="heatmap_voxel_size"
+            )
+            
+            yield Static("Minimum Density (points/voxel):")
+            yield Input(
+                placeholder="5",
+                value="5",
+                id="heatmap_min_density"
+            )
+            
+            yield Static("Minimum Opacity (0.1-1.0):")
+            yield Input(
+                placeholder="0.3",
+                value="0.3",
+                id="heatmap_opacity_min"
+            )
+            
+            yield Static("Maximum Opacity (0.1-1.0):")
+            yield Input(
+                placeholder="1.0",
+                value="1.0",
+                id="heatmap_opacity_max"
+            )
+            
+            yield Static("Fill Mode:")
+            yield Select(
+                options=[
+                    ("Solid", "solid"),
+                    ("Wireframe", "wireframe")
+                ],
+                value="solid",
+                id="heatmap_fill_mode"
+            )
+        
+        # 3D Clustering Section
+        yield Static("3D Gaze Clustering", classes="section-title")
+        with Container(classes="section-content"):
+            yield Checkbox("Enable 3D Clustering", value=True, id="enable_clustering")
+            yield Checkbox("Show Bounding Boxes", value=True, id="clustering_show_bounds")
+            
+            yield Static("Minimum Cluster Size (points):")
+            yield Input(
+                placeholder="30",
+                value="30",
+                id="clustering_min_size"
+            )
+            
+            yield Static("Minimum Samples:")
+            yield Input(
+                placeholder="5",
+                value="5",
+                id="clustering_min_samples"
+            )
+            
+            yield Static("Epsilon Distance (meters):")
+            yield Input(
+                placeholder="0.15",
+                value="0.15",
+                id="clustering_epsilon"
+            )
+            
+            yield Static("Point Opacity (0.1-1.0):")
+            yield Input(
+                placeholder="0.8",
+                value="0.8",
+                id="clustering_point_opacity"
+            )
+            
+            yield Static("Bounding Box Opacity (0.1-1.0):")
+            yield Input(
+                placeholder="0.3",
+                value="0.3",
+                id="clustering_bound_opacity"
+            )
+    
     def _create_object_detection_section(self):
         """Create the object detection configuration section."""
         yield Static("Object Detection", classes="section-title")
@@ -630,6 +718,9 @@ class MLGazeConfigApp(App):
                     # Object Detection Section
                     yield from self._create_object_detection_section()
                     
+                    # Spatial Analysis Sections
+                    yield from self._create_spatial_analysis_sections()
+                    
                     yield Static("IMU Sensor Data", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Show IMU Data", value=True, id="show_imu")
@@ -675,6 +766,9 @@ class MLGazeConfigApp(App):
         elif select_id == "object_detection_preprocessing_mode":
             if selected_value:
                 self.config.object_detection_preprocessing_mode = selected_value
+        elif select_id == "heatmap_fill_mode":
+            if selected_value:
+                self.config.plugin_configs["Gaze3DHeatmap"]["fill_mode"] = selected_value
     
     @on(Checkbox.Changed)
     def checkbox_changed(self, event: Checkbox.Changed) -> None:
@@ -709,6 +803,23 @@ class MLGazeConfigApp(App):
         elif checkbox_id == "enable_object_detection":
             self.config.enable_object_detection = value
             self._update_object_detection_status()
+        # Spatial Analysis checkboxes
+        elif checkbox_id == "enable_heatmap":
+            if "Gaze3DHeatmap" in self.config.enabled_plugins and not value:
+                self.config.enabled_plugins.remove("Gaze3DHeatmap")
+            elif "Gaze3DHeatmap" not in self.config.enabled_plugins and value:
+                self.config.enabled_plugins.append("Gaze3DHeatmap")
+        elif checkbox_id == "show_heatmap":
+            self.config.plugin_configs["Gaze3DHeatmap"]["show_heatmap"] = value
+        elif checkbox_id == "heatmap_use_boxes":
+            self.config.plugin_configs["Gaze3DHeatmap"]["use_boxes"] = value
+        elif checkbox_id == "enable_clustering":
+            if "Gaze3DClustering" in self.config.enabled_plugins and not value:
+                self.config.enabled_plugins.remove("Gaze3DClustering")
+            elif "Gaze3DClustering" not in self.config.enabled_plugins and value:
+                self.config.enabled_plugins.append("Gaze3DClustering")
+        elif checkbox_id == "clustering_show_bounds":
+            self.config.plugin_configs["Gaze3DClustering"]["show_bounds"] = value
     
     @on(RadioSet.Changed)
     def radioset_changed(self, event: RadioSet.Changed) -> None:
@@ -812,6 +923,62 @@ class MLGazeConfigApp(App):
                 
             elif input_id == "object_detection_target_classes":
                 self.config.object_detection_target_classes = value
+                
+            # Spatial Analysis Parameters - Heatmap
+            elif input_id == "heatmap_voxel_size":
+                if value:
+                    voxel_size = float(value)
+                    if 0.05 <= voxel_size <= 0.5:
+                        self.config.plugin_configs["Gaze3DHeatmap"]["voxel_size"] = voxel_size
+                        
+            elif input_id == "heatmap_min_density":
+                if value:
+                    min_density = int(value)
+                    if 1 <= min_density <= 50:
+                        self.config.plugin_configs["Gaze3DHeatmap"]["min_density"] = min_density
+                        
+            elif input_id == "heatmap_opacity_min":
+                if value:
+                    opacity = float(value)
+                    if 0.1 <= opacity <= 1.0:
+                        self.config.plugin_configs["Gaze3DHeatmap"]["opacity_min"] = opacity
+                        
+            elif input_id == "heatmap_opacity_max":
+                if value:
+                    opacity = float(value)
+                    if 0.1 <= opacity <= 1.0:
+                        self.config.plugin_configs["Gaze3DHeatmap"]["opacity_max"] = opacity
+                        
+            # Spatial Analysis Parameters - Clustering
+            elif input_id == "clustering_min_size":
+                if value:
+                    min_size = int(value)
+                    if 10 <= min_size <= 500:
+                        self.config.plugin_configs["Gaze3DClustering"]["min_cluster_size"] = min_size
+                        
+            elif input_id == "clustering_min_samples":
+                if value:
+                    min_samples = int(value)
+                    if 1 <= min_samples <= 50:
+                        self.config.plugin_configs["Gaze3DClustering"]["min_samples"] = min_samples
+                        
+            elif input_id == "clustering_epsilon":
+                if value:
+                    epsilon = float(value)
+                    if 0.05 <= epsilon <= 1.0:
+                        self.config.plugin_configs["Gaze3DClustering"]["epsilon_m"] = epsilon
+                        
+            elif input_id == "clustering_point_opacity":
+                if value:
+                    opacity = float(value)
+                    if 0.1 <= opacity <= 1.0:
+                        self.config.plugin_configs["Gaze3DClustering"]["point_opacity"] = opacity
+                        
+            elif input_id == "clustering_bound_opacity":
+                if value:
+                    opacity = float(value)
+                    if 0.1 <= opacity <= 1.0:
+                        self.config.plugin_configs["Gaze3DClustering"]["bound_opacity"] = opacity
                     
         except ValueError as e:
             if "fade_duration" in input_id:
