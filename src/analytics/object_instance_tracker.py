@@ -24,6 +24,9 @@ class TrackedInstance:
     detections: List[DetectedObject] = field(default_factory=list)
     associated_clusters: List[int] = field(default_factory=list)  # GazeCluster IDs
     confidence_scores: List[float] = field(default_factory=list)
+    bbox_3d: Optional[Dict] = None  # 3D bounding box if sufficient gaze data
+    gaze_quality: float = 0.0  # Average quality of associated gaze clusters
+    gaze_point_count: int = 0  # Number of gaze points used for 3D bbox
     
     @property
     def avg_confidence(self) -> float:
@@ -113,6 +116,15 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         self.min_detections = plugin_config.get('min_detections', 3)  # Min detections to confirm instance
         self.cluster_distance_threshold = plugin_config.get('cluster_distance_threshold', 0.2)  # 20cm default
         
+        # 3D visualization configuration
+        self.min_gaze_points = plugin_config.get('min_gaze_points', 50)  # Min points for 3D bbox
+        self.min_cluster_quality = plugin_config.get('min_cluster_quality', 0.5)
+        self.min_gaze_duration_ms = plugin_config.get('min_gaze_duration_ms', 200)
+        self.gaze_state_filter = plugin_config.get('gaze_state_filter', ['Fixation', 'Pursuit'])
+        self.bbox_padding_m = plugin_config.get('bbox_padding_m', 0.1)  # 10cm padding
+        self.outlier_method = plugin_config.get('outlier_method', 'iqr')
+        self.outlier_threshold = plugin_config.get('outlier_threshold', 1.5)
+        
         self.logger.info(f"Processing object instance tracking with IoU={self.iou_threshold}, "
                         f"max_gap={self.max_frame_gap} frames")
         
@@ -157,6 +169,9 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         else:
             self._association_method = 'none'
         
+        # Calculate 3D bounding boxes for well-attended objects
+        self._calculate_3d_bounding_boxes(session, deps)
+        
         # Calculate metrics
         metrics = self._calculate_tracking_metrics()
         
@@ -166,6 +181,9 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         
         # Generate report
         self._generate_tracking_report(metrics, session)
+        
+        # Generate CSV reports
+        self._generate_csv_reports(metrics, session)
         
         return metrics
     
@@ -655,7 +673,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         session.tracking_report = report
     
     def visualize(self, results: Dict, rr_stream=None) -> None:
-        """Visualize tracked instances in Rerun.
+        """Visualize tracked instances in Rerun with both 2D and 3D representations.
         
         Args:
             results: Results from process method
@@ -665,9 +683,13 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             self.logger.info("No tracked instances to visualize")
             return
         
-        # Log instance trajectories
+        from src.core.data_types import get_coco_class_color, get_coco_class_id
+        
+        visualized_3d = 0
+        
+        # Log instance trajectories and 3D bounding boxes
         for instance_id, instance in results['tracked_instances'].items():
-            # Create a path for each instance showing its movement
+            # 2D trajectory for RGB frames (always shown)
             if len(instance.detections) > 1:
                 # Extract center points of bounding boxes
                 centers = []
@@ -676,19 +698,18 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                     center_y = det.bbox.y + det.bbox.height / 2
                     centers.append([center_x, center_y])
                 
-                # Log as 2D trajectory (would be better with 3D positions)
-                entity_path = f"/tracking/instances/{instance.class_name}_{instance_id}"
+                # Log as 2D trajectory
+                entity_path_2d = f"/tracking/instances/{instance.class_name}_{instance_id}"
                 
-                # Log trajectory
                 rr.log(
-                    entity_path,
+                    entity_path_2d,
                     rr.LineStrips2D([centers]),
                     static=True
                 )
                 
-                # Log instance info
+                # Log instance info for 2D
                 rr.log(
-                    f"{entity_path}/info",
+                    f"{entity_path_2d}/info",
                     rr.TextDocument(
                         f"Instance {instance_id}\n"
                         f"Class: {instance.class_name}\n"
@@ -699,5 +720,274 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                     ),
                     static=True
                 )
+            
+            # 3D visualization for well-attended objects
+            if hasattr(instance, 'bbox_3d') and instance.bbox_3d is not None:
+                entity_path_3d = f"/world/objects/tracked/{instance.class_name}_{instance_id}"
+                
+                # Get class color
+                class_id = get_coco_class_id(instance.class_name)
+                color = get_coco_class_color(class_id)
+                
+                # Adjust opacity based on gaze quality
+                if hasattr(instance, 'gaze_quality'):
+                    opacity = int(128 + instance.gaze_quality * 127)  # 0.5-1.0 range
+                else:
+                    opacity = 200
+                color_with_alpha = [color[0], color[1], color[2], opacity]
+                
+                # Log 3D bounding box
+                rr.log(
+                    f"{entity_path_3d}/bbox_3d",
+                    rr.Boxes3D(
+                        centers=[instance.bbox_3d['center']],
+                        half_sizes=[instance.bbox_3d['half_sizes']],
+                        colors=[color_with_alpha],
+                        fill_mode="wireframe"
+                    ),
+                    static=False
+                )
+                
+                # Log centroid
+                rr.log(
+                    f"{entity_path_3d}/centroid",
+                    rr.Points3D(
+                        positions=[instance.bbox_3d['center']],
+                        colors=[color],
+                        radii=0.02
+                    ),
+                    static=False
+                )
+                
+                # Log 3D info
+                info_text = (
+                    f"Instance {instance_id}\n"
+                    f"Class: {instance.class_name}\n"
+                    f"Confidence: {instance.avg_confidence:.2f}\n"
+                    f"Gaze Points: {instance.gaze_point_count}\n"
+                    f"Gaze Quality: {instance.gaze_quality:.2f}\n"
+                    f"Duration: {instance.duration_ms:.1f} ms"
+                )
+                
+                rr.log(
+                    f"{entity_path_3d}/info",
+                    rr.TextDocument(info_text),
+                    static=False
+                )
+                
+                visualized_3d += 1
         
-        self.logger.info(f"Visualized {len(results['tracked_instances'])} tracked instances")
+        self.logger.info(f"Visualized {len(results['tracked_instances'])} instances "
+                        f"(2D: all, 3D: {visualized_3d} well-attended)")
+    
+    def _calculate_3d_bounding_boxes(self, session: SessionData, deps: Dict) -> None:
+        """Calculate 3D bounding boxes for well-attended instances.
+        
+        Args:
+            session: SessionData with gaze data
+            deps: Dependency results including clusters
+        """
+        has_clusters = "Gaze3DClustering" in deps and "error" not in deps.get("Gaze3DClustering", {})
+        
+        for instance_id, instance in self.tracked_instances.items():
+            # Skip if instance has insufficient gaze association
+            if not instance.associated_clusters and not has_clusters:
+                continue
+            
+            # Collect all gaze points within instance's 2D bounding boxes
+            gaze_points_3d = []
+            
+            for det in instance.detections:
+                # Get gaze points for this detection's timestamp
+                frame_gaze = session.gaze[
+                    (session.gaze['timestamp'] >= det.timestamp - 1e8) &  # 100ms window
+                    (session.gaze['timestamp'] <= det.timestamp + 1e8)
+                ]
+                
+                if frame_gaze.empty:
+                    continue
+                
+                # Filter gaze by hit type if configured
+                if hasattr(self, 'gaze_state_filter') and 'gazeState' in frame_gaze.columns:
+                    frame_gaze = frame_gaze[frame_gaze['gazeState'].isin(self.gaze_state_filter)]
+                
+                # Check which gaze points fall within 2D bbox
+                for _, gaze_row in frame_gaze.iterrows():
+                    if not gaze_row.get('hasHitTarget', False):
+                        continue
+                    
+                    # Get 3D position
+                    if 'gazePositionX' in gaze_row and 'gazePositionY' in gaze_row and 'gazePositionZ' in gaze_row:
+                        pos_3d = [gaze_row['gazePositionX'], gaze_row['gazePositionY'], gaze_row['gazePositionZ']]
+                        # Convert to Rerun coordinates
+                        rerun_pos = unity_to_rerun_position(pos_3d)
+                        gaze_points_3d.append(rerun_pos)
+            
+            # Check if we have enough points for reliable 3D bbox
+            if len(gaze_points_3d) < self.min_gaze_points:
+                continue
+            
+            # Check cluster quality if available
+            if has_clusters and instance.associated_clusters:
+                cluster_results = deps["Gaze3DClustering"]
+                if 'clusters' in cluster_results:
+                    avg_quality = np.mean([
+                        cluster_results['clusters'][cid].quality_score
+                        for cid in instance.associated_clusters
+                        if cid in cluster_results['clusters']
+                    ])
+                    if avg_quality < self.min_cluster_quality:
+                        continue
+                    instance.gaze_quality = avg_quality
+                else:
+                    instance.gaze_quality = 0.5
+            else:
+                instance.gaze_quality = 0.5
+            
+            # Calculate 3D bounding box from gaze points
+            bbox_3d = self._compute_gaze_based_bbox(instance, gaze_points_3d)
+            if bbox_3d is not None:
+                instance.bbox_3d = bbox_3d
+                instance.gaze_point_count = len(gaze_points_3d)
+    
+    def _compute_gaze_based_bbox(self, instance: TrackedInstance, gaze_points: List[np.ndarray]) -> Optional[Dict]:
+        """Compute 3D bounding box from gaze points.
+        
+        Args:
+            instance: Tracked instance
+            gaze_points: List of 3D gaze positions
+            
+        Returns:
+            Dict with 'center' and 'half_sizes' or None if insufficient data
+        """
+        if len(gaze_points) < 3:  # Need minimum points
+            return None
+        
+        points = np.array(gaze_points)
+        
+        # Remove outliers using IQR method
+        if self.outlier_method == 'iqr' and len(points) > 10:
+            q1 = np.percentile(points, 25, axis=0)
+            q3 = np.percentile(points, 75, axis=0)
+            iqr = q3 - q1
+            lower_bound = q1 - self.outlier_threshold * iqr
+            upper_bound = q3 + self.outlier_threshold * iqr
+            
+            # Filter to inliers only
+            mask = np.all((points >= lower_bound) & (points <= upper_bound), axis=1)
+            filtered_points = points[mask]
+            
+            if len(filtered_points) >= 3:
+                points = filtered_points
+        
+        # Calculate bounds with padding
+        min_bounds = np.min(points, axis=0) - self.bbox_padding_m
+        max_bounds = np.max(points, axis=0) + self.bbox_padding_m
+        
+        center = (min_bounds + max_bounds) / 2
+        half_sizes = (max_bounds - min_bounds) / 2
+        
+        return {
+            'center': center.tolist(),
+            'half_sizes': half_sizes.tolist(),
+            'min_bounds': min_bounds.tolist(),
+            'max_bounds': max_bounds.tolist()
+        }
+    
+    def _generate_csv_reports(self, metrics: Dict[str, Any], session: SessionData) -> None:
+        """Generate CSV reports for spatial analysis.
+        
+        Args:
+            metrics: Calculated tracking metrics
+            session: SessionData for context
+        """
+        from pathlib import Path
+        
+        # Create report directory
+        report_dir = Path(f"reports/{session.session_id}")
+        report_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 1. spatial_instances.csv - Instance details with 2D and 3D metrics
+        instance_data = []
+        for instance_id, instance in metrics['tracked_instances'].items():
+            # Calculate 2D metrics
+            avg_bbox_width = np.mean([d.bbox.width for d in instance.detections]) if instance.detections else 0
+            avg_bbox_height = np.mean([d.bbox.height for d in instance.detections]) if instance.detections else 0
+            
+            # Get 3D metrics if available
+            bbox_3d = getattr(instance, 'bbox_3d', None)
+            
+            instance_data.append({
+                'instance_id': instance_id,
+                'class_name': instance.class_name,
+                'first_seen_timestamp': instance.first_seen_timestamp,
+                'last_seen_timestamp': instance.last_seen_timestamp,
+                'duration_ms': instance.duration_ms,
+                'frame_count': instance.frame_count,
+                'avg_confidence': instance.avg_confidence,
+                # 2D metrics
+                'avg_bbox_width_2d': avg_bbox_width,
+                'avg_bbox_height_2d': avg_bbox_height,
+                # 3D metrics
+                'bbox_width_m': bbox_3d['half_sizes'][0] * 2 if bbox_3d else None,
+                'bbox_height_m': bbox_3d['half_sizes'][1] * 2 if bbox_3d else None,
+                'bbox_depth_m': bbox_3d['half_sizes'][2] * 2 if bbox_3d else None,
+                'centroid_x': bbox_3d['center'][0] if bbox_3d else None,
+                'centroid_y': bbox_3d['center'][1] if bbox_3d else None,
+                'centroid_z': bbox_3d['center'][2] if bbox_3d else None,
+                # Gaze metrics
+                'associated_clusters': ','.join(map(str, instance.associated_clusters)),
+                'num_clusters': len(instance.associated_clusters),
+                'gaze_quality': getattr(instance, 'gaze_quality', None),
+                'gaze_point_count': getattr(instance, 'gaze_point_count', 0),
+                'is_visualized_3d': bbox_3d is not None
+            })
+        
+        if instance_data:
+            instance_df = pd.DataFrame(instance_data)
+            instance_df = instance_df.sort_values('duration_ms', ascending=False)
+            instance_path = report_dir / "spatial_instances.csv"
+            instance_df.to_csv(instance_path, index=False)
+            self.logger.info(f"Saved instance report to {instance_path}")
+        
+        # 2. spatial_summary.csv - Overview statistics
+        num_visualized_3d = sum(1 for i in metrics['tracked_instances'].values() 
+                                if hasattr(i, 'bbox_3d') and i.bbox_3d is not None)
+        
+        summary_data = {
+            'metric': [
+                'total_instances',
+                'instances_filtered_out',
+                'instances_visualized_3d',
+                'instances_with_gaze',
+                'gaze_association_rate',
+                'association_method',
+                'avg_clusters_per_instance',
+                'avg_confidence',
+                'avg_duration_ms',
+                'unique_classes',
+                'min_gaze_points_threshold',
+                'min_cluster_quality_threshold',
+                'min_gaze_duration_ms_threshold'
+            ],
+            'value': [
+                metrics['total_instances'],
+                metrics.get('instances_filtered_out', 0),
+                num_visualized_3d,
+                metrics['instances_with_gaze'],
+                f"{metrics['gaze_association_rate']:.2%}",
+                metrics.get('association_method', 'none'),
+                f"{metrics.get('avg_clusters_per_instance', 0):.2f}",
+                f"{metrics['avg_confidence']:.2f}",
+                f"{metrics['avg_duration_ms']:.1f}",
+                metrics['unique_classes'],
+                self.min_gaze_points,
+                self.min_cluster_quality,
+                self.min_gaze_duration_ms
+            ]
+        }
+        
+        summary_df = pd.DataFrame(summary_data)
+        summary_path = report_dir / "spatial_summary.csv"
+        summary_df.to_csv(summary_path, index=False)
+        self.logger.info(f"Saved summary report to {summary_path}")
