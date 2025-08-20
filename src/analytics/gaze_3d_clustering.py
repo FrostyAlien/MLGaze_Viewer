@@ -76,9 +76,9 @@ class Gaze3DClustering(BaseGazeProcessor):
         
         # Extract configuration parameters
         self.config = plugin_config
-        self.min_cluster_size = plugin_config.get('min_cluster_size', 30)
+        self.min_cluster_size = plugin_config.get('min_cluster_size', 10)
         self.min_samples = plugin_config.get('min_samples', 5)
-        self.epsilon = plugin_config.get('epsilon_m', 0.15)
+        self.epsilon = plugin_config.get('epsilon_m', 0.05)
         
         # New visualization parameters
         self.show_bounds = plugin_config.get('show_bounds', True)
