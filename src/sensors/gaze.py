@@ -65,6 +65,22 @@ class GazeSensor(BaseSensor):
                 # Get color based on gaze state
                 color = self.get_color_for_state(row.get('gazeState', 'Unknown'))
                 
+                # Adjust visualization based on hit type
+                hit_type = row.get('gazeHitType', 'none')
+                if hit_type == 'mesh':
+                    # Mesh hits are more precise - use smaller, brighter points
+                    radius = 0.008
+                    # Make color slightly brighter for mesh hits
+                    color = [min(255, c + 30) for c in color]
+                elif hit_type == 'bbox':
+                    # Bounding box hits are less precise - use larger, dimmer points
+                    radius = 0.012
+                    # Make color slightly dimmer for bbox hits
+                    color = [int(c * 0.8) for c in color]
+                else:
+                    # Unknown or no hit type - use default
+                    radius = 0.01
+                
                 rr.log(
                     f"{self.entity_path}/rays",
                     rr.Arrows3D(
@@ -80,7 +96,7 @@ class GazeSensor(BaseSensor):
                     rr.Points3D(
                         positions=[position],
                         colors=[color],
-                        radii=0.01
+                        radii=radius
                     )
                 )
                 

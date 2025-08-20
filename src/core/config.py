@@ -120,6 +120,13 @@ class VisualizationConfig:
             "point_opacity": 0.8,  # Cluster points opacity
             "filter_enabled": False,  # Enable gaze state filtering
             "gaze_states_filter": []  # List of gaze states to include (empty = all)
+        },
+        "ObjectInstanceTracker": {
+            "enabled": True,
+            "iou_threshold": 0.3,  # IoU threshold for matching objects
+            "max_frame_gap": 10,  # Max frames between detections
+            "min_detections": 3,  # Min detections to confirm instance
+            "cluster_distance_m": 0.5  # Max distance to associate with gaze cluster
         }
     })
     

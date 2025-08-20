@@ -73,6 +73,13 @@ class DataLoader:
                                'isTracking', 'hasHitTarget', 'gazeState']
         self._validate_csv_columns(gaze_3d, required_gaze_3d_cols, "sensors/gaze_data.csv")
         
+        # Check for optional gazeHitType column
+        if 'gazeHitType' in gaze_3d.columns:
+            hit_types = gaze_3d['gazeHitType'].value_counts()
+            self.log.info(f"Found gazeHitType column with distribution: {hit_types.to_dict()}")
+        else:
+            self.log.debug("gazeHitType column not found (using legacy data format)")
+        
         imu = self._load_csv_optional(session_path / "sensors" / "imu_data.csv", "IMU data")
         
         # Determine primary camera (first one alphabetically by default)

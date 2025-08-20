@@ -7,13 +7,13 @@ import rerun as rr
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 
-from src.plugin_sys.base import AnalyticsPlugin
+from src.analytics.base_gaze_processor import BaseGazeProcessor
 from src.core import SessionData
 from src.core.data_types import GazeCluster
 from src.core.coordinate_utils import unity_to_rerun_position
 
 
-class Gaze3DClustering(AnalyticsPlugin):
+class Gaze3DClustering(BaseGazeProcessor):
     """Create spatial clusters from 3D gaze points using HDBSCAN.
     
     This plugin groups 3D gaze points into discrete spatial regions using
@@ -44,8 +44,6 @@ class Gaze3DClustering(AnalyticsPlugin):
         self.show_bounds = True
         self.bound_opacity = 0.3
         self.point_opacity = 0.8
-        self.filter_enabled = False
-        self.gaze_states_filter: List[str] = []
 
     
     def get_dependencies(self) -> List[str]:
@@ -87,13 +85,11 @@ class Gaze3DClustering(AnalyticsPlugin):
         self.bound_opacity = plugin_config.get('bound_opacity', 0.3)
         self.point_opacity = plugin_config.get('point_opacity', 0.8)
         
-        # Gaze state filtering parameters
-        self.filter_enabled = plugin_config.get('filter_enabled', False)
-        self.gaze_states_filter = plugin_config.get('gaze_states_filter', [])
+        # Extract common filtering configuration
+        self.extract_common_config(plugin_config)
         
-        filter_info = f", filter_states={self.gaze_states_filter}" if self.filter_enabled else ""
         self.logger.info(f"Processing with min_cluster_size={self.min_cluster_size}, "
-                        f"min_samples={self.min_samples}, epsilon={self.epsilon}m{filter_info}")
+                        f"min_samples={self.min_samples}, epsilon={self.epsilon}m{self.log_filter_info()}")
         
         if session.gaze.empty:
             self.logger.warning("No gaze data available for clustering")
@@ -106,8 +102,8 @@ class Gaze3DClustering(AnalyticsPlugin):
         
         self.logger.info(f"Processing {len(session.gaze)} gaze samples for clustering")
         
-        # Extract 3D gaze points
-        self._extract_3d_gaze_data(session.gaze)
+        # Extract 3D gaze points using base class method
+        self.gaze_points_3d, self.timestamps = self.extract_and_filter_3d_gaze(session.gaze, include_timestamps=True)
         
         if len(self.gaze_points_3d) < self.min_cluster_size:
             self.logger.warning(f"Not enough points ({len(self.gaze_points_3d)}) "
@@ -146,53 +142,6 @@ class Gaze3DClustering(AnalyticsPlugin):
         
         return metrics
     
-    def _extract_3d_gaze_data(self, gaze_df: pd.DataFrame) -> None:
-        """Extract 3D gaze points and timestamps from dataframe.
-        
-        Args:
-            gaze_df: DataFrame with gaze data
-        """
-        self.gaze_points_3d.clear()
-        self.timestamps.clear()
-        
-        # Check required columns exist
-        required_cols = ['isTracking', 'hasHitTarget', 'gazePositionX', 
-                        'gazePositionY', 'gazePositionZ', 'timestamp']
-        missing_cols = [col for col in required_cols if col not in gaze_df.columns]
-        if missing_cols:
-            self.logger.error(f"Missing required columns: {missing_cols}")
-            return
-        
-        # Filter for valid hit points
-        valid_gaze = gaze_df[
-            (gaze_df['isTracking'] == True) & 
-            (gaze_df['hasHitTarget'] == True)
-        ]
-        
-        # Apply gaze state filter if enabled
-        if self.filter_enabled and self.gaze_states_filter:
-            if 'gazeState' in valid_gaze.columns:
-                valid_gaze = valid_gaze[valid_gaze['gazeState'].isin(self.gaze_states_filter)]
-                self.logger.info(f"Filtering for gaze states: {self.gaze_states_filter}")
-            else:
-                self.logger.warning("gazeState column not found, skipping state filtering")
-        
-        if len(valid_gaze) == 0:
-            self.logger.warning("No valid gaze hit points found")
-            return
-        
-        self.logger.info(f"Found {len(valid_gaze)} valid gaze hit points")
-        
-        # Vectorized extraction
-        positions = valid_gaze[['gazePositionX', 'gazePositionY', 'gazePositionZ']].values
-        timestamps = valid_gaze['timestamp'].values.astype(np.int64)
-        
-        # Convert positions from Unity to Rerun coordinates
-        for unity_pos in positions:
-            rerun_pos = unity_to_rerun_position(unity_pos.tolist())
-            self.gaze_points_3d.append(rerun_pos)
-        
-        self.timestamps = timestamps.tolist()
     
     def _perform_clustering(self) -> np.ndarray:
         """Perform HDBSCAN clustering on 3D gaze points.

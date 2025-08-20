@@ -114,6 +114,26 @@ class BoundingBox:
         return len(self.bounds) == 6
     
     @property
+    def x(self) -> float:
+        """Get x coordinate."""
+        return self.bounds[0]
+    
+    @property
+    def y(self) -> float:
+        """Get y coordinate."""
+        return self.bounds[1]
+    
+    @property
+    def width(self) -> float:
+        """Get width."""
+        return self.bounds[2] if not self.is_3d else self.bounds[3]
+    
+    @property
+    def height(self) -> float:
+        """Get height."""
+        return self.bounds[3] if not self.is_3d else self.bounds[4]
+    
+    @property
     def center(self) -> np.ndarray:
         """Get center point of bounding box."""
         if self.is_3d:

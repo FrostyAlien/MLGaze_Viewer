@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Tuple, Optional
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.plugin_sys.base import AnalyticsPlugin
+from src.analytics.base_gaze_processor import BaseGazeProcessor
 from src.core import SessionData
 from src.core.coordinate_utils import unity_to_rerun_position
 
@@ -22,7 +22,7 @@ class VoxelData:
     center_position: np.ndarray
     
 
-class Gaze3DHeatmap(AnalyticsPlugin):
+class Gaze3DHeatmap(BaseGazeProcessor):
     """Generate 3D heatmap visualization of gaze density using voxel grid.
     
     This plugin creates a voxel-based density visualization showing WHERE
@@ -53,8 +53,6 @@ class Gaze3DHeatmap(AnalyticsPlugin):
         self.opacity_min = 0.3  # Default min opacity
         self.opacity_max = 1.0  # Default max opacity
         self.fill_mode = 'solid'  # Default fill mode
-        self.filter_enabled = False  # Default filtering off
-        self.gaze_states_filter: List[str] = []  # Default no filter
     
     def get_dependencies(self) -> List[str]:
         """No dependencies - works directly with gaze data."""
@@ -97,13 +95,11 @@ class Gaze3DHeatmap(AnalyticsPlugin):
         self.opacity_max = plugin_config.get('opacity_max', 1.0)
         self.fill_mode = plugin_config.get('fill_mode', 'solid')
         
-        # Gaze state filtering parameters
-        self.filter_enabled = plugin_config.get('filter_enabled', False)
-        self.gaze_states_filter = plugin_config.get('gaze_states_filter', [])
+        # Extract common filtering configuration
+        self.extract_common_config(plugin_config)
         
-        filter_info = f", filter_states={self.gaze_states_filter}" if self.filter_enabled else ""
         self.logger.info(f"Processing with voxel_size={self.voxel_size}m, "
-                        f"min_density={self.min_density}, use_boxes={self.use_boxes}{filter_info}")
+                        f"min_density={self.min_density}, use_boxes={self.use_boxes}{self.log_filter_info()}")
         
         if session.gaze.empty:
             self.logger.warning("No gaze data available for heatmap generation")
@@ -117,8 +113,8 @@ class Gaze3DHeatmap(AnalyticsPlugin):
         
         self.logger.info(f"Processing {len(session.gaze)} gaze samples for 3D heatmap")
         
-        # Extract 3D gaze hit points
-        self._extract_3d_gaze_points(session.gaze)
+        # Extract 3D gaze hit points using base class method
+        self.gaze_points_3d, _ = self.extract_and_filter_3d_gaze(session.gaze, include_timestamps=False)
         
         # Create voxel grid
         self._create_voxel_grid()
@@ -137,48 +133,6 @@ class Gaze3DHeatmap(AnalyticsPlugin):
         
         return metrics
     
-    def _extract_3d_gaze_points(self, gaze_df: pd.DataFrame) -> None:
-        """Extract 3D gaze hit points from dataframe.
-        
-        Args:
-            gaze_df: DataFrame with gaze data including position columns
-        """
-        self.gaze_points_3d.clear()
-        
-        # Check required columns exist
-        required_cols = ['isTracking', 'hasHitTarget', 'gazePositionX', 'gazePositionY', 'gazePositionZ']
-        missing_cols = [col for col in required_cols if col not in gaze_df.columns]
-        if missing_cols:
-            self.logger.error(f"Missing required columns: {missing_cols}")
-            return
-        
-        # Filter for valid hit points
-        valid_gaze = gaze_df[
-            (gaze_df['isTracking'] == True) & 
-            (gaze_df['hasHitTarget'] == True)
-        ]
-        
-        # Apply gaze state filter if enabled
-        if self.filter_enabled and self.gaze_states_filter:
-            if 'gazeState' in valid_gaze.columns:
-                valid_gaze = valid_gaze[valid_gaze['gazeState'].isin(self.gaze_states_filter)]
-                self.logger.info(f"Filtering for gaze states: {self.gaze_states_filter}")
-            else:
-                self.logger.warning("gazeState column not found, skipping state filtering")
-        
-        if len(valid_gaze) == 0:
-            self.logger.warning("No valid gaze hit points found")
-            return
-        
-        self.logger.info(f"Found {len(valid_gaze)} valid gaze hit points")
-        
-        # Vectorized extraction and conversion
-        positions = valid_gaze[['gazePositionX', 'gazePositionY', 'gazePositionZ']].values
-        
-        # Convert all positions from Unity to Rerun coordinates
-        for unity_pos in positions:
-            rerun_pos = unity_to_rerun_position(unity_pos.tolist())
-            self.gaze_points_3d.append(np.array(rerun_pos))
     
     def _create_voxel_grid(self) -> None:
         """Create voxel grid by counting points in each voxel."""
