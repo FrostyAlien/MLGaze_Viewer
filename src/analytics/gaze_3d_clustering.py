@@ -103,7 +103,32 @@ class Gaze3DClustering(BaseGazeProcessor):
         self.logger.info(f"Processing {len(session.gaze)} gaze samples for clustering")
         
         # Extract 3D gaze points using base class method
-        self.gaze_points_3d, self.timestamps = self.extract_and_filter_3d_gaze(session.gaze, include_timestamps=True)
+        try:
+            self.gaze_points_3d, self.timestamps = self.extract_and_filter_3d_gaze(session.gaze, include_timestamps=True)
+        except Exception as e:
+            self.logger.error(f"Error extracting gaze points: {e}")
+            return {
+                'clusters': {},
+                'num_clusters': 0,
+                'num_points': 0,
+                'num_noise': 0,
+                'noise_ratio': 0.0,
+                'largest_cluster_size': 0,
+                'avg_cluster_quality': 0.0,
+                'min_cluster_size': self.min_cluster_size,
+                'min_samples': self.min_samples,
+                'epsilon': self.epsilon
+            }
+        
+        # Validate gaze points for NaN/Inf values
+        if self.gaze_points_3d:
+            points_array = np.array(self.gaze_points_3d)
+            if np.any(~np.isfinite(points_array)):
+                self.logger.warning("Found NaN/Inf values in gaze points, filtering...")
+                valid_mask = np.all(np.isfinite(points_array), axis=1)
+                self.gaze_points_3d = [self.gaze_points_3d[i] for i in range(len(self.gaze_points_3d)) if valid_mask[i]]
+                self.timestamps = [self.timestamps[i] for i in range(len(self.timestamps)) if valid_mask[i]]
+                self.logger.info(f"Filtered to {len(self.gaze_points_3d)} valid points")
         
         if len(self.gaze_points_3d) < self.min_cluster_size:
             self.logger.warning(f"Not enough points ({len(self.gaze_points_3d)}) "
@@ -122,10 +147,30 @@ class Gaze3DClustering(BaseGazeProcessor):
             }
         
         # Perform HDBSCAN clustering
-        labels = self._perform_clustering()
+        try:
+            labels = self._perform_clustering()
+        except Exception as e:
+            self.logger.error(f"HDBSCAN clustering failed: {e}")
+            return {
+                'clusters': {},
+                'num_clusters': 0,
+                'num_points': len(self.gaze_points_3d),
+                'num_noise': len(self.gaze_points_3d),
+                'noise_ratio': 100.0,
+                'largest_cluster_size': 0,
+                'avg_cluster_quality': 0.0,
+                'min_cluster_size': self.min_cluster_size,
+                'min_samples': self.min_samples,
+                'epsilon': self.epsilon
+            }
         
         # Create GazeCluster objects
-        self._create_cluster_objects(labels)
+        try:
+            self._create_cluster_objects(labels)
+        except Exception as e:
+            self.logger.error(f"Error creating cluster objects: {e}")
+            # Continue with empty clusters rather than failing completely
+            self.clusters = {}
         
         # Calculate metrics
         metrics = self._calculate_clustering_metrics(labels)
