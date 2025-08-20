@@ -15,8 +15,10 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, ScrollableContainer
 from textual.widgets import (
-    Header, Footer, Static, Button, Input, Checkbox, Select, DirectoryTree, RadioSet, RadioButton
+    Header, Footer, Static, Button, Input, Checkbox, Select, DirectoryTree, RadioSet, RadioButton,
+    SelectionList
 )
+from textual.widgets.selection_list import Selection
 from textual.screen import ModalScreen
 
 # Import the centralized config from core module
@@ -534,6 +536,35 @@ class MLGazeConfigApp(App):
                 id="clustering_bound_opacity"
             )
     
+    def _create_gaze_state_filter_section(self):
+        """Create the gaze state filter configuration section."""
+        yield Static("Gaze State Filtering", classes="section-title")
+        with Container(classes="section-content"):
+            # Enable filtering checkbox
+            yield Checkbox("Enable Gaze State Filtering", value=False, id="enable_gaze_filter")
+            
+            # Multi-select list for gaze states
+            yield Static("Select gaze states to include (when enabled):")
+            
+            # Available gaze states from the data
+            gaze_states = [
+                ("Fixation", "Fixation"),
+                ("Pursuit", "Pursuit"),
+                ("Saccade", "Saccade"),
+                ("Blink", "Blink"),
+                ("Unknown", "Unknown"),
+                ("Wink Left", "WinkLeft"),
+                ("Wink Right", "WinkRight")
+            ]
+            
+            # Create SelectionList with all states initially selected
+            yield SelectionList(
+                *gaze_states,
+                id="gaze_states_selection"
+            )
+            
+            yield Static("Note: Empty selection means all states will be included", classes="help-text")
+    
     def _create_object_detection_section(self):
         """Create the object detection configuration section."""
         yield Static("Object Detection", classes="section-title")
@@ -721,6 +752,9 @@ class MLGazeConfigApp(App):
                     # Spatial Analysis Sections
                     yield from self._create_spatial_analysis_sections()
                     
+                    # Gaze State Filter Section
+                    yield from self._create_gaze_state_filter_section()
+                    
                     yield Static("IMU Sensor Data", classes="section-title")
                     with Container(classes="section-content"):
                         yield Checkbox("Show IMU Data", value=True, id="show_imu")
@@ -820,6 +854,21 @@ class MLGazeConfigApp(App):
                 self.config.enabled_plugins.append("Gaze3DClustering")
         elif checkbox_id == "clustering_show_bounds":
             self.config.plugin_configs["Gaze3DClustering"]["show_bounds"] = value
+        elif checkbox_id == "enable_gaze_filter":
+            # Apply filter enabled state to both spatial plugins
+            self.config.plugin_configs["Gaze3DHeatmap"]["filter_enabled"] = value
+            self.config.plugin_configs["Gaze3DClustering"]["filter_enabled"] = value
+    
+    @on(SelectionList.SelectedChanged)
+    def selection_list_changed(self, event: SelectionList.SelectedChanged) -> None:
+        """Handle selection list changes."""
+        if event.selection_list.id == "gaze_states_selection":
+            # Get the selected gaze states
+            selected_states = list(event.selection_list.selected)
+            
+            # Apply to both spatial plugins
+            self.config.plugin_configs["Gaze3DHeatmap"]["gaze_states_filter"] = selected_states
+            self.config.plugin_configs["Gaze3DClustering"]["gaze_states_filter"] = selected_states
     
     @on(RadioSet.Changed)
     def radioset_changed(self, event: RadioSet.Changed) -> None:
