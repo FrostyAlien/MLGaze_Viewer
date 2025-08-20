@@ -1,0 +1,703 @@
+"""Object instance tracking plugin that associates detected objects across frames and with gaze clusters."""
+
+import numpy as np
+import pandas as pd
+import rerun as rr
+from typing import Dict, Any, Optional, List, Tuple, Set
+from dataclasses import dataclass, field
+from collections import defaultdict
+
+from src.plugin_sys.base import AnalyticsPlugin
+from src.core import SessionData
+from src.core.data_types import DetectedObject, GazeCluster, SessionMetrics
+from src.core.coordinate_utils import unity_to_rerun_position
+
+
+@dataclass
+class TrackedInstance:
+    """Represents a tracked object instance across multiple frames."""
+    instance_id: int
+    class_name: str
+    first_seen_timestamp: int
+    last_seen_timestamp: int
+    frame_count: int = 0
+    detections: List[DetectedObject] = field(default_factory=list)
+    associated_clusters: List[int] = field(default_factory=list)  # GazeCluster IDs
+    confidence_scores: List[float] = field(default_factory=list)
+    
+    @property
+    def avg_confidence(self) -> float:
+        """Average confidence score across all detections."""
+        return np.mean(self.confidence_scores) if self.confidence_scores else 0.0
+    
+    @property
+    def duration_ms(self) -> float:
+        """Duration this instance was tracked in milliseconds."""
+        return (self.last_seen_timestamp - self.first_seen_timestamp) / 1e6
+    
+    @property
+    def is_active(self) -> bool:
+        """Check if instance is still active (seen recently).
+        
+        Note: This is currently unused as we track based on frame gaps.
+        Could be used for real-time tracking scenarios.
+        """
+        # This would need session context to work properly
+        # For now, tracking is handled by frame gap logic
+        return True
+
+
+class ObjectInstanceTracker(AnalyticsPlugin):
+    """Track object instances across frames and associate with gaze clusters.
+    
+    This plugin:
+    1. Associates detected objects across frames to create persistent instances
+    2. Links instances with nearby gaze clusters for spatial context
+    3. Tracks instance lifecycle (appearance, persistence, disappearance)
+    4. Provides metrics on instance-gaze relationships
+    """
+    
+    def __init__(self):
+        """Initialize the ObjectInstanceTracker."""
+        super().__init__("Object Instance Tracker")
+        self.tracked_instances: Dict[int, TrackedInstance] = {}
+        self.next_instance_id = 1
+        self.class_instance_counters = defaultdict(int)  # Track per-class instance counts
+    
+    def get_dependencies(self) -> List[str]:
+        """Return required dependencies.
+        
+        Returns:
+            List of required plugin class names
+        """
+        return ["ObjectDetector"]  # Only ObjectDetector is required
+    
+    def get_optional_dependencies(self) -> List[str]:
+        """Return optional dependencies for enhanced functionality.
+        
+        Returns:
+            List of optional plugin class names
+        """
+        return ["Gaze3DClustering", "GazeObjectInteraction"]
+    
+    def process(self, session: SessionData, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Process detected objects to create tracked instances.
+        
+        Args:
+            session: SessionData containing detected objects and gaze clusters
+            config: Optional configuration parameters
+            
+        Returns:
+            Dictionary containing tracked instances and metrics
+        """
+        if config is None:
+            config = {}
+        
+        # Check prerequisites
+        if session.gaze.empty:
+            error_msg = "No 3D gaze data available for instance tracking"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
+        
+        if not session.get_camera_names():
+            error_msg = "No camera data available for instance tracking"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
+        
+        # Get plugin-specific config
+        plugin_config = config.get('plugin_configs', {}).get(self.__class__.__name__, {})
+        
+        # Configuration parameters
+        self.iou_threshold = plugin_config.get('iou_threshold', 0.3)  # IoU for matching
+        self.max_frame_gap = plugin_config.get('max_frame_gap', 10)  # Max frames between detections
+        self.min_detections = plugin_config.get('min_detections', 3)  # Min detections to confirm instance
+        self.cluster_distance_threshold = plugin_config.get('cluster_distance_threshold', 0.2)  # 20cm default
+        
+        self.logger.info(f"Processing object instance tracking with IoU={self.iou_threshold}, "
+                        f"max_gap={self.max_frame_gap} frames")
+        
+        # Check required dependencies
+        deps = config.get("dependencies", {})
+        if "ObjectDetector" not in deps or "error" in deps.get("ObjectDetector", {}):
+            error_msg = "ObjectDetector dependency required but not available or has errors"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
+        
+        # Get detected objects from ObjectDetector results
+        detector_results = deps["ObjectDetector"]
+        if not detector_results or "error" in detector_results:
+            self.logger.warning("No detected objects available for instance tracking")
+            return self._create_empty_results()
+        
+        # Store detected objects in session for compatibility
+        if hasattr(detector_results, 'get') and 'detected_objects' in detector_results:
+            session.detected_objects = detector_results['detected_objects']
+        elif not hasattr(session, 'detected_objects'):
+            session.detected_objects = []
+        
+        if not session.detected_objects:
+            self.logger.warning("No detected objects found in session")
+            return self._create_empty_results()
+        
+        # Check optional dependencies
+        has_clusters = "Gaze3DClustering" in deps and "error" not in deps.get("Gaze3DClustering", {})
+        has_interactions = "GazeObjectInteraction" in deps and "error" not in deps.get("GazeObjectInteraction", {})
+        
+        if not has_clusters:
+            self.logger.info("Gaze3DClustering not available, tracking objects without cluster association")
+        if has_interactions:
+            self.logger.info("GazeObjectInteraction available, will use Visit-based association")
+        
+        # Process detections frame by frame
+        self._track_instances_across_frames(session)
+        
+        # Associate with gaze clusters if available
+        if has_clusters:
+            self._associate_with_gaze_clusters(session, deps)
+        else:
+            self._association_method = 'none'
+        
+        # Calculate metrics
+        metrics = self._calculate_tracking_metrics()
+        
+        # Store results in session
+        session.object_instances = self.tracked_instances
+        session.set_plugin_result('ObjectInstanceTracker', metrics)
+        
+        # Generate report
+        self._generate_tracking_report(metrics, session)
+        
+        return metrics
+    
+    def _track_instances_across_frames(self, session: SessionData) -> None:
+        """Track object instances across frames using IoU matching.
+        
+        Args:
+            session: SessionData with detected objects organized by frame
+        """
+        # Group detections by frame
+        frames_with_detections = defaultdict(list)
+        for det in session.detected_objects:
+            frames_with_detections[det.frame_id].append(det)
+        
+        # Sort frames chronologically
+        sorted_frames = sorted(frames_with_detections.keys())
+        
+        self.logger.info(f"Tracking objects across {len(sorted_frames)} frames")
+        
+        # Track frame by frame
+        active_instances = {}  # Maps instance_id to last detection
+        
+        for frame_id in sorted_frames:
+            detections = frames_with_detections[frame_id]
+            matched_instances = set()  # Track which instances were matched this frame
+            
+            for det in detections:
+                # Try to match with existing active instances
+                best_match_id = self._find_best_match(det, active_instances)
+                
+                if best_match_id is not None:
+                    # Update existing instance
+                    instance = self.tracked_instances[best_match_id]
+                    instance.detections.append(det)
+                    instance.confidence_scores.append(det.confidence)
+                    instance.last_seen_timestamp = det.timestamp
+                    instance.frame_count += 1
+                    active_instances[best_match_id] = det
+                    matched_instances.add(best_match_id)
+                else:
+                    # Create new instance
+                    instance_id = self._create_new_instance(det)
+                    active_instances[instance_id] = det
+                    matched_instances.add(instance_id)
+            
+            # Remove instances that weren't matched (could be inactive)
+            # Keep only matched instances as active
+            active_instances = {iid: det for iid, det in active_instances.items() 
+                              if iid in matched_instances}
+            
+            # Clean up inactive instances
+            self._cleanup_inactive_instances()
+    
+    def _find_best_match(self, detection: DetectedObject, 
+                        active_instances: Dict[int, DetectedObject]) -> Optional[int]:
+        """Find best matching instance for a detection.
+        
+        Args:
+            detection: Current detection to match
+            active_instances: Dictionary mapping instance_id to last detection
+            
+        Returns:
+            Instance ID of best match, or None if no match found
+        """
+        best_iou = 0.0
+        best_instance_id = None
+        
+        for instance_id, prev_det in active_instances.items():
+            # Check class match
+            if prev_det.class_name != detection.class_name:
+                continue
+            
+            # Check temporal proximity (same camera)
+            if prev_det.camera_name != detection.camera_name:
+                continue
+            
+            # Calculate IoU
+            iou = self._calculate_iou(prev_det.bbox, detection.bbox)
+            
+            if iou > self.iou_threshold and iou > best_iou:
+                best_iou = iou
+                best_instance_id = instance_id
+        
+        return best_instance_id
+    
+    def _calculate_iou(self, bbox1, bbox2) -> float:
+        """Calculate Intersection over Union for two bounding boxes.
+        
+        Args:
+            bbox1, bbox2: BoundingBox objects
+            
+        Returns:
+            IoU score between 0 and 1
+        """
+        # Get coordinates
+        x1_min, y1_min = bbox1.x, bbox1.y
+        x1_max, y1_max = bbox1.x + bbox1.width, bbox1.y + bbox1.height
+        x2_min, y2_min = bbox2.x, bbox2.y
+        x2_max, y2_max = bbox2.x + bbox2.width, bbox2.y + bbox2.height
+        
+        # Calculate intersection
+        inter_xmin = max(x1_min, x2_min)
+        inter_ymin = max(y1_min, y2_min)
+        inter_xmax = min(x1_max, x2_max)
+        inter_ymax = min(y1_max, y2_max)
+        
+        if inter_xmax < inter_xmin or inter_ymax < inter_ymin:
+            return 0.0
+        
+        inter_area = (inter_xmax - inter_xmin) * (inter_ymax - inter_ymin)
+        
+        # Calculate union
+        area1 = bbox1.width * bbox1.height
+        area2 = bbox2.width * bbox2.height
+        union_area = area1 + area2 - inter_area
+        
+        if union_area == 0:
+            return 0.0
+        
+        return inter_area / union_area
+    
+    def _create_new_instance(self, detection: DetectedObject) -> int:
+        """Create a new tracked instance.
+        
+        Args:
+            detection: Initial detection for the instance
+            
+        Returns:
+            New instance ID
+        """
+        instance_id = self.next_instance_id
+        self.next_instance_id += 1
+        
+        # Update per-class counter
+        self.class_instance_counters[detection.class_name] += 1
+        
+        instance = TrackedInstance(
+            instance_id=instance_id,
+            class_name=detection.class_name,
+            first_seen_timestamp=detection.timestamp,
+            last_seen_timestamp=detection.timestamp,
+            frame_count=1,
+            detections=[detection],
+            confidence_scores=[detection.confidence]
+        )
+        
+        self.tracked_instances[instance_id] = instance
+        return instance_id
+    
+    def _cleanup_inactive_instances(self) -> None:
+        """Remove instances that haven't been seen recently."""
+        # For now, we keep all instances for analysis
+        # In a real-time system, we would remove inactive ones
+        pass
+    
+    def _filter_gaze_by_hit_type(self, gaze_df: pd.DataFrame) -> pd.DataFrame:
+        """Filter gaze data preferring mesh hits over bbox hits.
+        
+        Args:
+            gaze_df: DataFrame with gaze data
+            
+        Returns:
+            Filtered DataFrame with preferred hit types
+        """
+        if 'gazeHitType' not in gaze_df.columns:
+            return gaze_df
+        
+        mesh_hits = gaze_df[gaze_df['gazeHitType'] == 'mesh']
+        if not mesh_hits.empty:
+            return mesh_hits
+            
+        bbox_hits = gaze_df[gaze_df['gazeHitType'] == 'bbox']
+        if not bbox_hits.empty:
+            return bbox_hits
+            
+        return gaze_df
+    
+    def _check_gaze_cluster_proximity(self, gaze_df: pd.DataFrame, 
+                                     cluster: GazeCluster) -> bool:
+        """Check if any gaze points are within proximity of a cluster.
+        
+        Args:
+            gaze_df: DataFrame with gaze points to check
+            cluster: GazeCluster to check proximity against
+            
+        Returns:
+            True if any gaze point is within cluster distance threshold
+        """
+        for _, gaze_point in gaze_df.iterrows():
+            # Get gaze position in Unity coordinates
+            gaze_pos = np.array([
+                gaze_point.get('posX', 0),
+                gaze_point.get('posY', 0),
+                gaze_point.get('posZ', 0)
+            ])
+            
+            # Convert to Rerun coordinates
+            gaze_pos_rerun = unity_to_rerun_position(gaze_pos.tolist())
+            
+            # Check distance to cluster centroid
+            distance = np.linalg.norm(np.array(gaze_pos_rerun) - cluster.centroid)
+            if distance <= self.cluster_distance_threshold:
+                return True
+        
+        return False
+    
+    def _associate_with_gaze_clusters(self, session: SessionData, deps: Dict[str, Any]) -> None:
+        """Associate tracked instances with gaze clusters using Visit data or spatial proximity.
+        
+        Args:
+            session: SessionData with gaze clusters
+            deps: Dependency results dictionary
+        """
+        if not session.gaze_clusters:
+            self.logger.info("No gaze clusters available for association")
+            return
+        
+        self.logger.info(f"Associating {len(self.tracked_instances)} instances with "
+                        f"{len(session.gaze_clusters)} gaze clusters")
+        
+        # Try Visit-based association first (most accurate)
+        if "GazeObjectInteraction" in deps and "error" not in deps.get("GazeObjectInteraction", {}):
+            interaction_results = deps["GazeObjectInteraction"]
+            if interaction_results and "metrics" in interaction_results:
+                self.logger.info("Using Visit-based cluster association")
+                self._association_method = 'visit-based'
+                self._associate_using_visits(session, interaction_results["metrics"])
+                return
+        
+        # Fallback to spatial proximity
+        self.logger.info("Using spatial proximity for cluster association")
+        self._association_method = 'spatial-proximity'
+        self._associate_using_spatial_proximity(session)
+    
+    def _associate_using_visits(self, session: SessionData, interaction_metrics: SessionMetrics) -> None:
+        """Use Visit timestamps to find which clusters objects were viewed with.
+        
+        This creates behaviorally-grounded associations based on actual gaze interactions.
+        
+        Args:
+            session: SessionData with gaze and cluster data
+            interaction_metrics: SessionMetrics from GazeObjectInteraction
+        """
+        associations_made = 0
+        
+        for instance in self.tracked_instances.values():
+            associated_clusters = set()
+            
+            # Find visits to this object class during instance lifetime
+            for camera_name, camera_metrics in interaction_metrics.camera_metrics.items():
+                for obj_key_str, obj_metrics in camera_metrics.object_metrics.items():
+                    # Check if this is the same object class
+                    if obj_metrics.object_key.class_name != instance.class_name:
+                        continue
+                    
+                    # Check each visit for temporal overlap with instance
+                    for visit in obj_metrics.visits:
+                        # Check if visit overlaps with instance lifetime
+                        visit_end = visit.end_timestamp if visit.end_timestamp else session.end_timestamp
+                        
+                        if (visit.start_timestamp <= instance.last_seen_timestamp and
+                            visit_end >= instance.first_seen_timestamp):
+                            
+                            # Find 3D gaze points during this visit
+                            gaze_mask = (session.gaze['timestamp'] >= visit.start_timestamp) & \
+                                       (session.gaze['timestamp'] <= visit_end)
+                            visit_gaze = session.gaze[gaze_mask]
+                            
+                            if visit_gaze.empty:
+                                continue
+                            
+                            # Check which clusters these gaze points belong to
+                            for cluster_id, cluster in session.gaze_clusters.items():
+                                # Filter gaze by hit type preference and check proximity
+                                filtered_gaze = self._filter_gaze_by_hit_type(visit_gaze)
+                                if self._check_gaze_cluster_proximity(filtered_gaze, cluster):
+                                    associated_clusters.add(cluster_id)
+            
+            # Store associations
+            instance.associated_clusters = list(associated_clusters)
+            if associated_clusters:
+                associations_made += 1
+                self.logger.debug(f"Instance {instance.instance_id} ({instance.class_name}) "
+                                f"associated with clusters: {associated_clusters}")
+        
+        self.logger.info(f"Visit-based association: {associations_made}/{len(self.tracked_instances)} "
+                        f"instances associated with clusters")
+    
+    def _associate_using_spatial_proximity(self, session: SessionData) -> None:
+        """Fallback: Associate instances with clusters based on spatial proximity.
+        
+        Uses 3D gaze points during instance lifetime to find nearby clusters.
+        
+        Args:
+            session: SessionData with gaze and cluster data
+        """
+        associations_made = 0
+        
+        for instance in self.tracked_instances.values():
+            associated_clusters = set()
+            
+            # Get gaze points during instance lifetime
+            time_mask = (session.gaze['timestamp'] >= instance.first_seen_timestamp) & \
+                       (session.gaze['timestamp'] <= instance.last_seen_timestamp)
+            relevant_gaze = session.gaze[time_mask]
+            
+            if relevant_gaze.empty:
+                self.logger.debug(f"No gaze data during instance {instance.instance_id} lifetime")
+                continue
+            
+            # Check each cluster for proximity to relevant gaze points
+            for cluster_id, cluster in session.gaze_clusters.items():
+                # Filter gaze by hit type preference and check proximity
+                filtered_gaze = self._filter_gaze_by_hit_type(relevant_gaze)
+                if self._check_gaze_cluster_proximity(filtered_gaze, cluster):
+                    associated_clusters.add(cluster_id)
+            
+            # Store associations
+            instance.associated_clusters = list(associated_clusters)
+            if associated_clusters:
+                associations_made += 1
+                self.logger.debug(f"Instance {instance.instance_id} ({instance.class_name}) "
+                                f"spatially associated with clusters: {associated_clusters}")
+        
+        self.logger.info(f"Spatial proximity association: {associations_made}/{len(self.tracked_instances)} "
+                        f"instances associated with clusters")
+    
+    def _calculate_tracking_metrics(self) -> Dict[str, Any]:
+        """Calculate metrics for tracked instances.
+        
+        Returns:
+            Dictionary with tracking metrics
+        """
+        if not self.tracked_instances:
+            return self._create_empty_results()
+        
+        # Filter by minimum detections if configured
+        filtered_instances = {}
+        for instance_id, instance in self.tracked_instances.items():
+            if instance.frame_count >= self.min_detections:
+                filtered_instances[instance_id] = instance
+        
+        if not filtered_instances:
+            self.logger.info(f"No instances met minimum detection threshold of {self.min_detections}")
+            return self._create_empty_results()
+        
+        # Calculate per-class statistics
+        class_stats = defaultdict(lambda: {
+            'count': 0,
+            'total_frames': 0,
+            'avg_confidence': 0.0,
+            'with_gaze': 0,
+            'avg_clusters_per_instance': 0.0
+        })
+        
+        total_with_gaze = 0
+        confidence_scores = []
+        durations = []
+        cluster_counts = []
+        association_method = getattr(self, '_association_method', 'none')
+        
+        for instance in filtered_instances.values():
+            stats = class_stats[instance.class_name]
+            stats['count'] += 1
+            stats['total_frames'] += instance.frame_count
+            
+            confidence_scores.append(instance.avg_confidence)
+            durations.append(instance.duration_ms)
+            
+            if instance.associated_clusters:
+                stats['with_gaze'] += 1
+                total_with_gaze += 1
+                cluster_counts.append(len(instance.associated_clusters))
+            else:
+                cluster_counts.append(0)
+        
+        # Calculate averages
+        for class_name, stats in class_stats.items():
+            if stats['count'] > 0:
+                stats['avg_frames'] = stats['total_frames'] / stats['count']
+                stats['gaze_association_rate'] = stats['with_gaze'] / stats['count']
+                # Calculate average clusters per instance for this class
+                class_instances = [i for i in filtered_instances.values() if i.class_name == class_name]
+                class_cluster_counts = [len(i.associated_clusters) for i in class_instances]
+                stats['avg_clusters_per_instance'] = np.mean(class_cluster_counts) if class_cluster_counts else 0
+        
+        return {
+            'total_instances': len(filtered_instances),
+            'instances_filtered_out': len(self.tracked_instances) - len(filtered_instances),
+            'instances_with_gaze': total_with_gaze,
+            'gaze_association_rate': total_with_gaze / len(filtered_instances) if filtered_instances else 0,
+            'association_method': association_method,
+            'avg_clusters_per_instance': np.mean(cluster_counts) if cluster_counts else 0,
+            'class_statistics': dict(class_stats),
+            'avg_confidence': np.mean(confidence_scores) if confidence_scores else 0,
+            'avg_duration_ms': np.mean(durations) if durations else 0,
+            'unique_classes': len(self.class_instance_counters),
+            'class_counts': dict(self.class_instance_counters),
+            'tracked_instances': filtered_instances,
+            'configuration': {
+                'iou_threshold': self.iou_threshold,
+                'max_frame_gap': self.max_frame_gap,
+                'min_detections': self.min_detections,
+                'cluster_distance_threshold': self.cluster_distance_threshold
+            }
+        }
+    
+    def _create_empty_results(self) -> Dict[str, Any]:
+        """Create empty results structure.
+        
+        Returns:
+            Empty metrics dictionary
+        """
+        return {
+            'total_instances': 0,
+            'instances_filtered_out': 0,
+            'instances_with_gaze': 0,
+            'gaze_association_rate': 0.0,
+            'association_method': 'none',
+            'avg_clusters_per_instance': 0.0,
+            'class_statistics': {},
+            'avg_confidence': 0.0,
+            'avg_duration_ms': 0.0,
+            'unique_classes': 0,
+            'class_counts': {},
+            'tracked_instances': {},
+            'configuration': {
+                'iou_threshold': getattr(self, 'iou_threshold', 0.3),
+                'max_frame_gap': getattr(self, 'max_frame_gap', 10),
+                'min_detections': getattr(self, 'min_detections', 3),
+                'cluster_distance_threshold': getattr(self, 'cluster_distance_threshold', 0.2)
+            }
+        }
+    
+    def _generate_tracking_report(self, metrics: Dict[str, Any], session: SessionData) -> None:
+        """Generate a tracking report.
+        
+        Args:
+            metrics: Calculated tracking metrics
+            session: SessionData for context
+        """
+        report_lines = [
+            f"=== Object Instance Tracking Report ===",
+            f"Session: {session.session_id}",
+            f"",
+            f"Summary:",
+            f"  Total Instances Tracked: {metrics['total_instances']}",
+            f"  Instances Filtered Out: {metrics.get('instances_filtered_out', 0)}",
+            f"  Unique Object Classes: {metrics['unique_classes']}",
+            f"  Association Method: {metrics.get('association_method', 'none')}",
+            f"  Instances with Gaze Association: {metrics['instances_with_gaze']} "
+            f"({metrics['gaze_association_rate']:.1%})",
+            f"  Average Clusters per Instance: {metrics.get('avg_clusters_per_instance', 0):.1f}",
+            f"  Average Confidence: {metrics['avg_confidence']:.2f}",
+            f"  Average Track Duration: {metrics['avg_duration_ms']:.1f} ms",
+            f"",
+            f"Configuration:",
+            f"  IoU Threshold: {metrics['configuration']['iou_threshold']}",
+            f"  Max Frame Gap: {metrics['configuration']['max_frame_gap']}",
+            f"  Min Detections: {metrics['configuration']['min_detections']}",
+            f"  Cluster Distance: {metrics['configuration']['cluster_distance_threshold']}m",
+            f"",
+            f"Per-Class Statistics:"
+        ]
+        
+        for class_name, stats in metrics['class_statistics'].items():
+            report_lines.extend([
+                f"  {class_name}:",
+                f"    Instances: {stats['count']}",
+                f"    Avg Frames per Instance: {stats.get('avg_frames', 0):.1f}",
+                f"    Gaze Association Rate: {stats.get('gaze_association_rate', 0):.1%}"
+            ])
+        
+        report_lines.extend([
+            f"",
+            f"Instance Counts by Class:",
+        ])
+        
+        for class_name, count in sorted(metrics['class_counts'].items()):
+            report_lines.append(f"  {class_name}: {count}")
+        
+        # Log report
+        report = "\n".join(report_lines)
+        self.logger.info(f"\n{report}")
+        
+        # Store report in session
+        session.tracking_report = report
+    
+    def visualize(self, results: Dict, rr_stream=None) -> None:
+        """Visualize tracked instances in Rerun.
+        
+        Args:
+            results: Results from process method
+            rr_stream: Rerun stream for logging
+        """
+        if not results['tracked_instances']:
+            self.logger.info("No tracked instances to visualize")
+            return
+        
+        # Log instance trajectories
+        for instance_id, instance in results['tracked_instances'].items():
+            # Create a path for each instance showing its movement
+            if len(instance.detections) > 1:
+                # Extract center points of bounding boxes
+                centers = []
+                for det in instance.detections:
+                    center_x = det.bbox.x + det.bbox.width / 2
+                    center_y = det.bbox.y + det.bbox.height / 2
+                    centers.append([center_x, center_y])
+                
+                # Log as 2D trajectory (would be better with 3D positions)
+                entity_path = f"/tracking/instances/{instance.class_name}_{instance_id}"
+                
+                # Log trajectory
+                rr.log(
+                    entity_path,
+                    rr.LineStrips2D([centers]),
+                    static=True
+                )
+                
+                # Log instance info
+                rr.log(
+                    f"{entity_path}/info",
+                    rr.TextDocument(
+                        f"Instance {instance_id}\n"
+                        f"Class: {instance.class_name}\n"
+                        f"Frames: {instance.frame_count}\n"
+                        f"Avg Confidence: {instance.avg_confidence:.2f}\n"
+                        f"Duration: {instance.duration_ms:.1f} ms\n"
+                        f"Gaze Clusters: {len(instance.associated_clusters)}"
+                    ),
+                    static=True
+                )
+        
+        self.logger.info(f"Visualized {len(results['tracked_instances'])} tracked instances")
