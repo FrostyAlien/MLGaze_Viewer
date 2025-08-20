@@ -38,9 +38,15 @@ class Gaze3DClustering(AnalyticsPlugin):
         
         # Config will be set in process()
         self.config = {}
-        self.min_cluster_size = 30  # Default
-        self.min_samples = 5  # Default
-        self.epsilon = 0.15  # Default
+        self.min_cluster_size = 30
+        self.min_samples = 5
+        self.epsilon = 0.15
+        self.show_bounds = True
+        self.bound_opacity = 0.3
+        self.point_opacity = 0.8
+        self.filter_enabled = False
+        self.gaze_states_filter: List[str] = []
+
     
     def get_dependencies(self) -> List[str]:
         """No hard dependencies - works directly with gaze data."""
@@ -81,8 +87,13 @@ class Gaze3DClustering(AnalyticsPlugin):
         self.bound_opacity = plugin_config.get('bound_opacity', 0.3)
         self.point_opacity = plugin_config.get('point_opacity', 0.8)
         
+        # Gaze state filtering parameters
+        self.filter_enabled = plugin_config.get('filter_enabled', False)
+        self.gaze_states_filter = plugin_config.get('gaze_states_filter', [])
+        
+        filter_info = f", filter_states={self.gaze_states_filter}" if self.filter_enabled else ""
         self.logger.info(f"Processing with min_cluster_size={self.min_cluster_size}, "
-                        f"min_samples={self.min_samples}, epsilon={self.epsilon}m")
+                        f"min_samples={self.min_samples}, epsilon={self.epsilon}m{filter_info}")
         
         if session.gaze.empty:
             self.logger.warning("No gaze data available for clustering")
@@ -104,8 +115,14 @@ class Gaze3DClustering(AnalyticsPlugin):
             return {
                 'clusters': {},
                 'num_clusters': 0,
+                'num_points': len(self.gaze_points_3d),
+                'num_noise': len(self.gaze_points_3d),
                 'noise_ratio': 100.0,
-                'largest_cluster_size': 0
+                'largest_cluster_size': 0,
+                'avg_cluster_quality': 0.0,
+                'min_cluster_size': self.min_cluster_size,
+                'min_samples': self.min_samples,
+                'epsilon': self.epsilon
             }
         
         # Perform HDBSCAN clustering
@@ -151,6 +168,14 @@ class Gaze3DClustering(AnalyticsPlugin):
             (gaze_df['isTracking'] == True) & 
             (gaze_df['hasHitTarget'] == True)
         ]
+        
+        # Apply gaze state filter if enabled
+        if self.filter_enabled and self.gaze_states_filter:
+            if 'gazeState' in valid_gaze.columns:
+                valid_gaze = valid_gaze[valid_gaze['gazeState'].isin(self.gaze_states_filter)]
+                self.logger.info(f"Filtering for gaze states: {self.gaze_states_filter}")
+            else:
+                self.logger.warning("gazeState column not found, skipping state filtering")
         
         if len(valid_gaze) == 0:
             self.logger.warning("No valid gaze hit points found")
