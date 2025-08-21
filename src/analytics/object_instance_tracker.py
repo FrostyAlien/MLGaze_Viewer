@@ -66,6 +66,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
     
     Configuration Options:
     - lifecycle_mode: Controls how objects appear in timeline visualization
+    - tracking_cameras: 'all' or list of camera names to track objects from
     - iou_threshold: IoU threshold for matching objects across frames
     - max_frame_gap: Maximum frames between detections for same instance
     - min_detections: Minimum detections required to confirm instance
@@ -77,6 +78,27 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         self.tracked_instances: Dict[int, TrackedInstance] = {}
         self.next_instance_id = 1
         self.class_instance_counters = defaultdict(int)  # Track per-class instance counts
+        
+        # Initialize configuration attributes with defaults
+        # Tracking configuration
+        self.iou_threshold = 0.3
+        self.max_frame_gap = 10
+        self.min_detections = 3
+        self.cluster_distance_threshold = 0.2
+        
+        # 3D visualization configuration
+        self.min_gaze_points = 50
+        self.min_cluster_quality = 0.5
+        self.min_gaze_duration_ms = 200
+        self.gaze_time_window_ms = 100
+        self.gaze_state_filter = ['Fixation', 'Pursuit']
+        self.bbox_padding_m = 0.1
+        self.outlier_method = 'iqr'
+        self.outlier_threshold = 1.5
+        
+        # Lifecycle and camera configuration
+        self.lifecycle_mode = 'persistent'
+        self.tracking_cameras = 'all'
     
     def get_dependencies(self) -> List[str]:
         """Return required dependencies.
@@ -101,6 +123,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             session: SessionData containing detected objects and gaze clusters
             config: Optional configuration parameters including:
                 - lifecycle_mode: 'persistent', 'temporal', or 'visit-based'
+                - tracking_cameras: 'all' or list of camera names to track (default: 'all')
                 - iou_threshold: IoU threshold for matching objects (default: 0.3)
                 - max_frame_gap: Max frames between detections (default: 10)
                 - min_detections: Min detections to confirm instance (default: 3)
@@ -127,25 +150,29 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         # Get plugin-specific config
         plugin_config = config.get('plugin_configs', {}).get(self.__class__.__name__, {})
         
-        # Configuration parameters
-        self.iou_threshold = plugin_config.get('iou_threshold', 0.3)  # IoU for matching
-        self.max_frame_gap = plugin_config.get('max_frame_gap', 10)  # Max frames between detections
-        self.min_detections = plugin_config.get('min_detections', 3)  # Min detections to confirm instance
-        self.cluster_distance_threshold = plugin_config.get('cluster_distance_threshold', 0.2)  # 20cm default
+        # Update configuration from provided config (keeping defaults if not provided)
+        self.iou_threshold = plugin_config.get('iou_threshold', self.iou_threshold)
+        self.max_frame_gap = plugin_config.get('max_frame_gap', self.max_frame_gap)
+        self.min_detections = plugin_config.get('min_detections', self.min_detections)
+        self.cluster_distance_threshold = plugin_config.get('cluster_distance_threshold', self.cluster_distance_threshold)
         
         # 3D visualization configuration
-        self.min_gaze_points = plugin_config.get('min_gaze_points', 50)  # Min points for 3D bbox
-        self.min_cluster_quality = plugin_config.get('min_cluster_quality', 0.5)
-        self.min_gaze_duration_ms = plugin_config.get('min_gaze_duration_ms', 200)
-        self.gaze_time_window_ms = plugin_config.get('gaze_time_window_ms', 100)  # Time window for gaze collection
-        self.gaze_state_filter = plugin_config.get('gaze_state_filter', ['Fixation', 'Pursuit'])
-        self.bbox_padding_m = plugin_config.get('bbox_padding_m', 0.1)  # 10cm padding
-        self.outlier_method = plugin_config.get('outlier_method', 'iqr')
-        self.outlier_threshold = plugin_config.get('outlier_threshold', 1.5)
-        self.lifecycle_mode = plugin_config.get('lifecycle_mode', 'persistent')  # persistent, temporal, visit-based
+        self.min_gaze_points = plugin_config.get('min_gaze_points', self.min_gaze_points)
+        self.min_cluster_quality = plugin_config.get('min_cluster_quality', self.min_cluster_quality)
+        self.min_gaze_duration_ms = plugin_config.get('min_gaze_duration_ms', self.min_gaze_duration_ms)
+        self.gaze_time_window_ms = plugin_config.get('gaze_time_window_ms', self.gaze_time_window_ms)
+        self.gaze_state_filter = plugin_config.get('gaze_state_filter', self.gaze_state_filter)
+        self.bbox_padding_m = plugin_config.get('bbox_padding_m', self.bbox_padding_m)
+        self.outlier_method = plugin_config.get('outlier_method', self.outlier_method)
+        self.outlier_threshold = plugin_config.get('outlier_threshold', self.outlier_threshold)
+        
+        # Lifecycle and camera configuration
+        self.lifecycle_mode = plugin_config.get('lifecycle_mode', self.lifecycle_mode)
+        self.tracking_cameras = plugin_config.get('tracking_cameras', self.tracking_cameras)
         
         self.logger.info(f"Processing object instance tracking with IoU={self.iou_threshold}, "
-                        f"max_gap={self.max_frame_gap} frames, lifecycle_mode={self.lifecycle_mode}")
+                        f"max_gap={self.max_frame_gap} frames, lifecycle_mode={self.lifecycle_mode}, "
+                        f"tracking_cameras={self.tracking_cameras}")
         
         # Check required dependencies
         deps = config.get("dependencies", {})
@@ -224,6 +251,11 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         frames_with_detections = defaultdict(list)
         
         for camera_name, camera_detections in session.detections.items():
+            # Filter cameras based on tracking_cameras configuration
+            if self.tracking_cameras != 'all' and camera_name not in self.tracking_cameras:
+                self.logger.debug(f"Skipping camera {camera_name} - not in tracking_cameras list")
+                continue
+                
             for frame_id, detections in camera_detections.items():
                 for detection in detections:
                     # Camera context should already be set during detection
@@ -632,7 +664,8 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 'max_frame_gap': self.max_frame_gap,
                 'min_detections': self.min_detections,
                 'cluster_distance_threshold': self.cluster_distance_threshold,
-                'lifecycle_mode': self.lifecycle_mode
+                'lifecycle_mode': self.lifecycle_mode,
+                'tracking_cameras': self.tracking_cameras
             }
         }
     
@@ -660,7 +693,8 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 'max_frame_gap': getattr(self, 'max_frame_gap', 10),
                 'min_detections': getattr(self, 'min_detections', 3),
                 'cluster_distance_threshold': getattr(self, 'cluster_distance_threshold', 0.2),
-                'lifecycle_mode': getattr(self, 'lifecycle_mode', 'persistent')
+                'lifecycle_mode': getattr(self, 'lifecycle_mode', 'persistent'),
+                'tracking_cameras': getattr(self, 'tracking_cameras', 'all')
             }
         }
     
@@ -692,6 +726,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             f"  Min Detections: {metrics['configuration']['min_detections']}",
             f"  Cluster Distance: {metrics['configuration']['cluster_distance_threshold']}m",
             f"  Lifecycle Mode: {metrics['configuration'].get('lifecycle_mode', 'persistent')}",
+            f"  Tracking Cameras: {metrics['configuration'].get('tracking_cameras', 'all')}",
             f"",
             f"Per-Class Statistics:"
         ]
@@ -916,10 +951,33 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             get_coco_class_id: Function to get COCO class IDs
             results: Plugin results containing potential visit data
         """
-        # This would require visit data from GazeObjectInteraction plugin
-        # For now, fall back to temporal visualization
-        self.logger.info("Visit-based visualization requested but not fully implemented, using temporal mode")
-        self._visualize_temporal_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+        # Check if we have visit data from GazeObjectInteraction
+        if 'tracked_instances' not in results or not results['tracked_instances']:
+            self.logger.info("Visit-based mode: No tracked instances available, using temporal fallback")
+            self._visualize_temporal_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+            return
+        
+        # Try to get visit data from session or dependency results
+        visit_timeline = self._extract_visit_timeline(results)
+        
+        if not visit_timeline:
+            self.logger.info("Visit-based mode: No visit data available, using temporal fallback")
+            self._visualize_temporal_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+            return
+        
+        self.logger.info(f"Visit-based visualization: Found {len(visit_timeline)} visit periods")
+        
+        # Build object visibility based on visits
+        visit_visibility = self._build_visit_visibility(instances_3d, visit_timeline)
+        
+        # Log objects at each visit timestamp
+        for timestamp in sorted(visit_visibility.keys()):
+            visible_instances = visit_visibility[timestamp]
+            
+            if visible_instances:
+                # Set timeline to this timestamp
+                rr.set_time("timestamp", timestamp=timestamp / 1e9)
+                self._log_instances_batch(visible_instances, get_coco_class_color, get_coco_class_id)
     
     def _log_instances_batch(self, instances: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
         """Helper method to log a batch of instances at the current timeline timestamp.

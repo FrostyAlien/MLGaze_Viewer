@@ -349,6 +349,9 @@ class MLGazeConfigApp(App):
                         
                 except Exception as e:
                     self.show_error(f"Failed to populate camera selection: {e}")
+            
+            # Also update tracking cameras SelectionList for Object Instance Tracker
+            self._update_tracking_cameras_selection()
                     
         except Exception as e:
             self.show_error(f"Camera selection UI error: {e}")
@@ -358,10 +361,51 @@ class MLGazeConfigApp(App):
         try:
             camera_container = self.query_one("#camera_selection")
             camera_container.display = False
+            
+            # Also clear tracking cameras selection
+            self._update_tracking_cameras_selection(clear=True)
         except Exception as e:
             pass  # Silently handle UI cleanup errors
         self.cameras = []
         self.config.primary_camera = ""
+    
+    def _update_tracking_cameras_selection(self, clear: bool = False) -> None:
+        """Update tracking cameras SelectionList by replacing the widget.
+        
+        Args:
+            clear: If True, create empty SelectionList. If False, populate with cameras.
+        """
+        try:
+            # Get the container for the SelectionList
+            container = self.query_one("#instance_tracking_cameras_container")
+            
+            # Remove the old SelectionList if it exists
+            try:
+                old_list = container.query_one("#instance_tracking_cameras")
+                old_list.remove()
+            except:
+                pass  # Widget might not exist yet
+            
+            if clear or not self.cameras:
+                # Create empty SelectionList when clearing or no cameras
+                new_list = SelectionList(id="instance_tracking_cameras")
+            else:
+                # Create SelectionList with camera options (all selected by default)
+                camera_options = [(camera_name, camera_name) for camera_name in self.cameras]
+                new_list = SelectionList(*camera_options, id="instance_tracking_cameras")
+                
+                # Select all cameras by default
+                for i in range(len(self.cameras)):
+                    new_list.select(i)
+                
+                # Initialize config with all cameras
+                self.config.plugin_configs["ObjectInstanceTracker"]["tracking_cameras"] = "all"
+            
+            # Mount the new SelectionList
+            container.mount(new_list)
+            
+        except Exception as e:
+            self.show_error(f"Failed to update tracking cameras selection: {e}")
     
     def _update_object_detection_status(self) -> None:
         """Update object detection status indicator."""
@@ -542,6 +586,17 @@ class MLGazeConfigApp(App):
             yield Checkbox("Enable Object Instance Tracker", value=True, id="enable_instance_tracker")
             yield Checkbox("Show 3D Bounding Boxes", value=True, id="instance_show_3d_boxes")
             yield Checkbox("Generate CSV Reports", value=True, id="instance_generate_reports")
+            
+            yield Static("Tracking Cameras:")
+            with Container(classes="selection-container", id="instance_tracking_cameras_container"):
+                yield Static("Select cameras to track objects from:", id="tracking_cameras_instruction")
+                yield SelectionList(id="instance_tracking_cameras")
+            
+            yield Static("Lifecycle Mode:")
+            yield RadioSet(
+                "persistent", "temporal", "visit-based",
+                id="instance_lifecycle_mode"
+            )
             
             yield Static("IoU Threshold (0.1-0.9):")
             yield Input(
@@ -927,6 +982,15 @@ class MLGazeConfigApp(App):
             # Apply to both spatial plugins
             self.config.plugin_configs["Gaze3DHeatmap"]["gaze_states_filter"] = selected_states
             self.config.plugin_configs["Gaze3DClustering"]["gaze_states_filter"] = selected_states
+        elif event.selection_list.id == "instance_tracking_cameras":
+            # Get the selected cameras for object tracking
+            selected_cameras = list(event.selection_list.selected)
+            
+            # Set tracking cameras config - use 'all' if nothing selected or all selected
+            if not selected_cameras or len(selected_cameras) == len(self.cameras):
+                self.config.plugin_configs["ObjectInstanceTracker"]["tracking_cameras"] = "all"
+            else:
+                self.config.plugin_configs["ObjectInstanceTracker"]["tracking_cameras"] = selected_cameras
     
     @on(RadioSet.Changed)
     def radioset_changed(self, event: RadioSet.Changed) -> None:
@@ -937,6 +1001,11 @@ class MLGazeConfigApp(App):
                 self.config.timestamp_sync_mode = "union"
             elif selected_button.id == "intersection_mode":
                 self.config.timestamp_sync_mode = "intersection"
+        elif event.radio_set.id == "instance_lifecycle_mode":
+            # Get the selected lifecycle mode
+            selected_button = event.pressed
+            if selected_button:
+                self.config.plugin_configs["ObjectInstanceTracker"]["lifecycle_mode"] = selected_button.label
     
     @on(Input.Changed)
     def input_changed(self, event: Input.Changed) -> None:
