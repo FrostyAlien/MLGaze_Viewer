@@ -56,8 +56,19 @@ class ObjectInstanceTracker(AnalyticsPlugin):
     This plugin:
     1. Associates detected objects across frames to create persistent instances
     2. Links instances with nearby gaze clusters for spatial context
-    3. Tracks instance lifecycle (appearance, persistence, disappearance)
+    3. Tracks instance lifecycle with configurable visualization modes
     4. Provides metrics on instance-gaze relationships
+    
+    Lifecycle Management Modes:
+    - persistent: Objects remain visible once detected (default)
+    - temporal: Objects appear/disappear based on detection timestamps
+    - visit-based: Objects visible only during gaze visits
+    
+    Configuration Options:
+    - lifecycle_mode: Controls how objects appear in timeline visualization
+    - iou_threshold: IoU threshold for matching objects across frames
+    - max_frame_gap: Maximum frames between detections for same instance
+    - min_detections: Minimum detections required to confirm instance
     """
     
     def __init__(self):
@@ -88,10 +99,16 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         
         Args:
             session: SessionData containing detected objects and gaze clusters
-            config: Optional configuration parameters
+            config: Optional configuration parameters including:
+                - lifecycle_mode: 'persistent', 'temporal', or 'visit-based'
+                - iou_threshold: IoU threshold for matching objects (default: 0.3)
+                - max_frame_gap: Max frames between detections (default: 10)
+                - min_detections: Min detections to confirm instance (default: 3)
+                - cluster_distance_threshold: Distance for gaze association (default: 0.2m)
+                - min_gaze_points: Min gaze points for 3D bbox (default: 50)
             
         Returns:
-            Dictionary containing tracked instances and metrics
+            Dictionary containing tracked instances and metrics with lifecycle configuration
         """
         if config is None:
             config = {}
@@ -674,6 +691,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             f"  Max Frame Gap: {metrics['configuration']['max_frame_gap']}",
             f"  Min Detections: {metrics['configuration']['min_detections']}",
             f"  Cluster Distance: {metrics['configuration']['cluster_distance_threshold']}m",
+            f"  Lifecycle Mode: {metrics['configuration'].get('lifecycle_mode', 'persistent')}",
             f"",
             f"Per-Class Statistics:"
         ]
@@ -702,14 +720,18 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         session.tracking_report = report
     
     def visualize(self, results: Dict, rr_stream=None) -> None:
-        """Visualize tracked instances in Rerun with consolidated entity paths and proper temporal logging.
+        """Visualize tracked instances in Rerun with consolidated entity paths and lifecycle management.
         
         Uses batch logging to consolidate all instances under organized 3D world space paths
-        instead of creating individual entity paths for each instance. Objects appear at their
-        correct detection timestamps throughout the session.
+        instead of creating individual entity paths for each instance. Object visibility is 
+        controlled by the configured lifecycle_mode:
+        
+        - persistent: Objects appear at first detection and remain visible
+        - temporal: Objects appear/disappear based on detection timestamps
+        - visit-based: Objects visible only during gaze visits
         
         Args:
-            results: Results from process method
+            results: Results from process method containing tracked instances and configuration
             rr_stream: Rerun stream for logging
         """
         if not results['tracked_instances']:
@@ -815,7 +837,17 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             self._visualize_persistent_objects(instances_3d, get_coco_class_color, get_coco_class_id)
     
     def _visualize_persistent_objects(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
-        """Visualize objects persistently - once detected, they remain visible throughout session."""
+        """Visualize objects persistently - once detected, they remain visible throughout session.
+        
+        This mode provides traditional object tracking visualization where objects appear
+        at their first detection timestamp and remain visible for the entire session.
+        Useful for showing all tracked objects simultaneously.
+        
+        Args:
+            instances_3d: List of 3D instance data with bbox_3d information
+            get_coco_class_color: Function to get COCO class colors
+            get_coco_class_id: Function to get COCO class IDs
+        """
         if not instances_3d:
             return
             
@@ -832,7 +864,18 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             self._log_instances_batch(instances_3d, get_coco_class_color, get_coco_class_id)
     
     def _visualize_temporal_objects(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
-        """Visualize objects only during their detection lifetime."""
+        """Visualize objects only during their detection lifetime.
+        
+        This mode provides realistic object visualization where objects appear and disappear
+        based on their actual detection timestamps. Objects are only visible when they
+        are actively being detected in the camera frames. Provides temporal accuracy
+        for understanding when objects were actually present.
+        
+        Args:
+            instances_3d: List of 3D instance data with detection timestamps
+            get_coco_class_color: Function to get COCO class colors
+            get_coco_class_id: Function to get COCO class IDs
+        """
         # Collect all timestamps where objects are visible
         visibility_by_timestamp = {}  # timestamp -> list of visible instances
         
@@ -857,14 +900,38 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 self._log_instances_batch(visible_instances, get_coco_class_color, get_coco_class_id)
     
     def _visualize_visit_based_objects(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id, results: Dict) -> None:
-        """Visualize objects only during gaze visits."""
+        """Visualize objects only during gaze visits.
+        
+        This mode shows objects only when they are actively being looked at, based on
+        gaze visit data from the GazeObjectInteraction plugin. Objects appear when
+        gaze visits begin and disappear when visits end, providing attention-driven
+        visualization that highlights user focus patterns.
+        
+        Note: Currently falls back to temporal mode. Full implementation requires
+        integration with Visit data from GazeObjectInteraction plugin results.
+        
+        Args:
+            instances_3d: List of 3D instance data
+            get_coco_class_color: Function to get COCO class colors  
+            get_coco_class_id: Function to get COCO class IDs
+            results: Plugin results containing potential visit data
+        """
         # This would require visit data from GazeObjectInteraction plugin
         # For now, fall back to temporal visualization
         self.logger.info("Visit-based visualization requested but not fully implemented, using temporal mode")
         self._visualize_temporal_objects(instances_3d, get_coco_class_color, get_coco_class_id)
     
     def _log_instances_batch(self, instances: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
-        """Helper method to log a batch of instances at the current timestamp."""
+        """Helper method to log a batch of instances at the current timeline timestamp.
+        
+        Consolidates multiple object instances into efficient batch logging to minimize
+        Rerun entity overhead while maintaining rich metadata for each instance.
+        
+        Args:
+            instances: List of instance dictionaries with 'instance_id', 'instance', 'class_name'
+            get_coco_class_color: Function to get COCO class colors
+            get_coco_class_id: Function to get COCO class IDs
+        """
         centers_3d = []
         half_sizes_3d = []
         colors_3d = []
