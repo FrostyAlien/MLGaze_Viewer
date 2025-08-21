@@ -53,23 +53,59 @@ class TrackedInstance:
 class ObjectInstanceTracker(AnalyticsPlugin):
     """Track object instances across frames and associate with gaze clusters.
     
-    This plugin:
-    1. Associates detected objects across frames to create persistent instances
-    2. Links instances with nearby gaze clusters for spatial context
-    3. Tracks instance lifecycle with configurable visualization modes
-    4. Provides metrics on instance-gaze relationships
+    This plugin provides comprehensive object instance tracking with three visualization modes:
+    
+    Core Functionality:
+    1. Associates detected objects across frames using IoU-based matching
+    2. Links instances with gaze clusters for spatial context and 3D bounding boxes
+    3. Tracks complete instance lifecycle from appearance to disappearance
+    4. Generates detailed metrics and CSV reports for spatial analysis
     
     Lifecycle Management Modes:
-    - persistent: Objects remain visible once detected (default)
-    - temporal: Objects appear/disappear based on detection timestamps
-    - visit-based: Objects visible only during gaze visits
     
-    Configuration Options:
-    - lifecycle_mode: Controls how objects appear in timeline visualization
-    - tracking_cameras: 'all' or list of camera names to track objects from
-    - iou_threshold: IoU threshold for matching objects across frames
-    - max_frame_gap: Maximum frames between detections for same instance
-    - min_detections: Minimum detections required to confirm instance
+    1. **persistent**: Objects remain visible once detected until session end
+       - Best for understanding overall object presence
+       - Objects accumulate over time for complete spatial coverage
+    
+    2. **temporal**: Objects appear/disappear based on actual detection timestamps
+       - Objects visible only when detected in camera frames
+       - Provides accurate temporal representation of object presence
+       - Objects fade out when no longer detected (configurable frame gap)
+    
+    3. **visit-based**: Objects visible only during gaze visits (requires GazeObjectInteraction)
+       - Objects appear when gaze visits occur on them
+       - Supports visit padding for smoother transitions
+       - Can filter to only fixation visits
+       - Ideal for understanding attention-based object interactions
+    
+    Configuration Parameters:
+    
+    Tracking Configuration:
+    - iou_threshold (0.1-0.9): IoU threshold for matching objects across frames
+    - max_frame_gap (1-100): Maximum frames between detections for same instance
+    - min_detections (1-20): Minimum detections required to confirm instance
+    - tracking_cameras: 'all' or list of specific camera names to track from
+    
+    3D Visualization Configuration:
+    - cluster_distance_threshold (0.01-2.0): Distance for gaze cluster association
+    - min_gaze_points (10-1000): Minimum gaze points for 3D bounding box calculation
+    - min_cluster_quality (0.0-1.0): Minimum gaze cluster quality for association
+    - gaze_state_filter: List of gaze states to include ['Fixation', 'Saccade', 'Pursuit', 'Blink', 'Unknown']
+    
+    Visit-Based Mode Configuration:
+    - visit_padding_ms (0.0-1000.0): Extra time before/after visits for smoother visualization
+    - require_fixation (bool): Only show objects during fixation visits
+    - min_visit_duration_ms (10.0-5000.0): Minimum visit duration to show object
+    
+    Dependencies:
+    - Required: ObjectDetector
+    - Optional: Gaze3DClustering (for 3D bounding boxes), GazeObjectInteraction (for visit-based mode)
+    
+    Outputs:
+    - Tracked instances with spatial and temporal metrics
+    - 3D bounding boxes for well-attended objects
+    - CSV reports for spatial analysis integration
+    - Rerun visualization in consolidated entity paths
     """
     
     def __init__(self):
@@ -99,6 +135,31 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         # Lifecycle and camera configuration
         self.lifecycle_mode = 'persistent'
         self.tracking_cameras = 'all'
+        
+        # Visit-based mode configuration
+        self.visit_padding_ms = 100  # Extra time before/after visits
+        self.require_fixation = False  # Only show during fixation visits  
+        self.min_visit_duration_ms = 50  # Minimum visit duration to show object
+    
+    def _validate_float(self, value: Any, param_name: str, min_val: float, max_val: float) -> float:
+        """Validate a float parameter within specified bounds."""
+        try:
+            float_val = float(value)
+            if not (min_val <= float_val <= max_val):
+                raise ValueError(f"{param_name} must be between {min_val} and {max_val}, got {float_val}")
+            return float_val
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid {param_name}: {e}")
+    
+    def _validate_int(self, value: Any, param_name: str, min_val: int, max_val: int) -> int:
+        """Validate an integer parameter within specified bounds."""
+        try:
+            int_val = int(value)
+            if not (min_val <= int_val <= max_val):
+                raise ValueError(f"{param_name} must be between {min_val} and {max_val}, got {int_val}")
+            return int_val
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid {param_name}: {e}")
     
     def get_dependencies(self) -> List[str]:
         """Return required dependencies.
@@ -117,21 +178,53 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         return ["Gaze3DClustering", "GazeObjectInteraction"]
     
     def process(self, session: SessionData, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Process detected objects to create tracked instances.
+        """Process detected objects to create tracked instances with full lifecycle management.
+        
+        This method performs comprehensive object instance tracking with configurable visualization modes:
+        1. Validates all configuration parameters with proper error handling
+        2. Tracks objects across frames using IoU-based matching with cross-camera support
+        3. Associates instances with gaze clusters for spatial context (if available)
+        4. Calculates 3D bounding boxes for well-attended objects
+        5. Generates detailed metrics and CSV reports
+        6. Visualizes instances in Rerun with consolidated entity paths
         
         Args:
-            session: SessionData containing detected objects and gaze clusters
-            config: Optional configuration parameters including:
-                - lifecycle_mode: 'persistent', 'temporal', or 'visit-based'
-                - tracking_cameras: 'all' or list of camera names to track (default: 'all')
-                - iou_threshold: IoU threshold for matching objects (default: 0.3)
-                - max_frame_gap: Max frames between detections (default: 10)
-                - min_detections: Min detections to confirm instance (default: 3)
-                - cluster_distance_threshold: Distance for gaze association (default: 0.2m)
-                - min_gaze_points: Min gaze points for 3D bbox (default: 50)
+            session: SessionData containing detected objects, gaze data, and camera information
+            config: Configuration dictionary with plugin_configs.ObjectInstanceTracker containing:
+                
+                Core Tracking Parameters:
+                - lifecycle_mode (str): 'persistent', 'temporal', or 'visit-based' (default: 'persistent')
+                - tracking_cameras (str|list): 'all' or list of camera names (default: 'all')
+                - iou_threshold (float): IoU threshold 0.1-0.9 for object matching (default: 0.3)
+                - max_frame_gap (int): Max frames 1-100 between detections (default: 10)
+                - min_detections (int): Min detections 1-20 to confirm instance (default: 3)
+                
+                3D Visualization Parameters:
+                - cluster_distance_threshold (float): Distance 0.01-2.0m for gaze association (default: 0.2)
+                - min_gaze_points (int): Min gaze points 10-1000 for 3D bbox (default: 50)
+                - min_cluster_quality (float): Min cluster quality 0.0-1.0 (default: 0.5)
+                - min_gaze_duration_ms (float): Min gaze duration 10-10000ms (default: 200)
+                - gaze_time_window_ms (float): Gaze time window 10-1000ms (default: 100)
+                - gaze_state_filter (list): Gaze states to include (default: ['Fixation', 'Pursuit'])
+                - bbox_padding_m (float): 3D bbox padding 0.0-1.0m (default: 0.1)
+                - outlier_method (str): 'iqr', 'std', or 'none' (default: 'iqr')
+                - outlier_threshold (float): Outlier threshold 1.0-5.0 (default: 1.5)
+                
+                Visit-Based Mode Parameters (requires GazeObjectInteraction):
+                - visit_padding_ms (float): Extra time 0.0-1000ms before/after visits (default: 100)
+                - require_fixation (bool): Only show during fixation visits (default: false)
+                - min_visit_duration_ms (float): Min visit duration 10-5000ms (default: 50)
             
         Returns:
-            Dictionary containing tracked instances and metrics with lifecycle configuration
+            Dictionary containing:
+            - tracked_instances: Dict of TrackedInstance objects by instance_id
+            - metrics: Comprehensive tracking and spatial metrics
+            - visualization_mode: Applied lifecycle mode
+            - error: Error message if processing failed
+            
+        Raises:
+            ValueError: If configuration parameters are invalid
+            RuntimeError: If required dependencies are missing or failed
         """
         if config is None:
             config = {}
@@ -150,25 +243,87 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         # Get plugin-specific config
         plugin_config = config.get('plugin_configs', {}).get(self.__class__.__name__, {})
         
-        # Update configuration from provided config (keeping defaults if not provided)
-        self.iou_threshold = plugin_config.get('iou_threshold', self.iou_threshold)
-        self.max_frame_gap = plugin_config.get('max_frame_gap', self.max_frame_gap)
-        self.min_detections = plugin_config.get('min_detections', self.min_detections)
-        self.cluster_distance_threshold = plugin_config.get('cluster_distance_threshold', self.cluster_distance_threshold)
-        
-        # 3D visualization configuration
-        self.min_gaze_points = plugin_config.get('min_gaze_points', self.min_gaze_points)
-        self.min_cluster_quality = plugin_config.get('min_cluster_quality', self.min_cluster_quality)
-        self.min_gaze_duration_ms = plugin_config.get('min_gaze_duration_ms', self.min_gaze_duration_ms)
-        self.gaze_time_window_ms = plugin_config.get('gaze_time_window_ms', self.gaze_time_window_ms)
-        self.gaze_state_filter = plugin_config.get('gaze_state_filter', self.gaze_state_filter)
-        self.bbox_padding_m = plugin_config.get('bbox_padding_m', self.bbox_padding_m)
-        self.outlier_method = plugin_config.get('outlier_method', self.outlier_method)
-        self.outlier_threshold = plugin_config.get('outlier_threshold', self.outlier_threshold)
-        
-        # Lifecycle and camera configuration
-        self.lifecycle_mode = plugin_config.get('lifecycle_mode', self.lifecycle_mode)
-        self.tracking_cameras = plugin_config.get('tracking_cameras', self.tracking_cameras)
+        # Update and validate configuration from provided config
+        try:
+            # Validate and set tracking parameters
+            self.iou_threshold = self._validate_float(plugin_config.get('iou_threshold', self.iou_threshold), 
+                                                   'iou_threshold', 0.1, 0.9)
+            self.max_frame_gap = self._validate_int(plugin_config.get('max_frame_gap', self.max_frame_gap), 
+                                                  'max_frame_gap', 1, 100)
+            self.min_detections = self._validate_int(plugin_config.get('min_detections', self.min_detections), 
+                                                   'min_detections', 1, 20)
+            self.cluster_distance_threshold = self._validate_float(plugin_config.get('cluster_distance_threshold', 
+                                                                                   self.cluster_distance_threshold), 
+                                                                 'cluster_distance_threshold', 0.01, 2.0)
+            
+            # Validate and set 3D visualization configuration
+            self.min_gaze_points = self._validate_int(plugin_config.get('min_gaze_points', self.min_gaze_points), 
+                                                    'min_gaze_points', 10, 1000)
+            self.min_cluster_quality = self._validate_float(plugin_config.get('min_cluster_quality', 
+                                                                            self.min_cluster_quality), 
+                                                          'min_cluster_quality', 0.0, 1.0)
+            self.min_gaze_duration_ms = self._validate_float(plugin_config.get('min_gaze_duration_ms', 
+                                                                             self.min_gaze_duration_ms), 
+                                                           'min_gaze_duration_ms', 10.0, 10000.0)
+            self.gaze_time_window_ms = self._validate_float(plugin_config.get('gaze_time_window_ms', 
+                                                                            self.gaze_time_window_ms), 
+                                                          'gaze_time_window_ms', 10.0, 1000.0)
+            self.bbox_padding_m = self._validate_float(plugin_config.get('bbox_padding_m', self.bbox_padding_m), 
+                                                     'bbox_padding_m', 0.0, 1.0)
+            self.outlier_threshold = self._validate_float(plugin_config.get('outlier_threshold', self.outlier_threshold), 
+                                                        'outlier_threshold', 1.0, 5.0)
+            
+            # Validate gaze state filter
+            gaze_state_filter = plugin_config.get('gaze_state_filter', self.gaze_state_filter)
+            if not isinstance(gaze_state_filter, list):
+                raise ValueError("gaze_state_filter must be a list of gaze states")
+            valid_states = ['Fixation', 'Saccade', 'Pursuit', 'Blink', 'Unknown']
+            for state in gaze_state_filter:
+                if state not in valid_states:
+                    raise ValueError(f"Invalid gaze state '{state}'. Valid states: {valid_states}")
+            self.gaze_state_filter = gaze_state_filter
+            
+            # Validate outlier method
+            outlier_method = plugin_config.get('outlier_method', self.outlier_method)
+            valid_methods = ['iqr', 'std', 'none']
+            if outlier_method not in valid_methods:
+                raise ValueError(f"Invalid outlier_method '{outlier_method}'. Valid methods: {valid_methods}")
+            self.outlier_method = outlier_method
+            
+            # Validate and set lifecycle mode
+            lifecycle_mode = plugin_config.get('lifecycle_mode', self.lifecycle_mode)
+            valid_modes = ['persistent', 'temporal', 'visit-based']
+            if lifecycle_mode not in valid_modes:
+                raise ValueError(f"Invalid lifecycle_mode '{lifecycle_mode}'. Valid modes: {valid_modes}")
+            self.lifecycle_mode = lifecycle_mode
+            
+            # Validate and set tracking cameras
+            tracking_cameras = plugin_config.get('tracking_cameras', self.tracking_cameras)
+            if tracking_cameras != 'all' and not isinstance(tracking_cameras, list):
+                raise ValueError("tracking_cameras must be 'all' or a list of camera names")
+            if isinstance(tracking_cameras, list):
+                available_cameras = session.get_camera_names()
+                for camera in tracking_cameras:
+                    if camera not in available_cameras:
+                        raise ValueError(f"Tracking camera '{camera}' not found. Available: {available_cameras}")
+            self.tracking_cameras = tracking_cameras
+            
+            # Validate visit-based mode configuration
+            self.visit_padding_ms = self._validate_float(plugin_config.get('visit_padding_ms', self.visit_padding_ms), 
+                                                       'visit_padding_ms', 0.0, 1000.0)
+            self.min_visit_duration_ms = self._validate_float(plugin_config.get('min_visit_duration_ms', 
+                                                                              self.min_visit_duration_ms), 
+                                                            'min_visit_duration_ms', 10.0, 5000.0)
+            
+            require_fixation = plugin_config.get('require_fixation', self.require_fixation)
+            if not isinstance(require_fixation, bool):
+                raise ValueError("require_fixation must be a boolean")
+            self.require_fixation = require_fixation
+            
+        except (ValueError, TypeError) as e:
+            error_msg = f"Configuration validation error: {e}"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
         
         self.logger.info(f"Processing object instance tracking with IoU={self.iou_threshold}, "
                         f"max_gap={self.max_frame_gap} frames, lifecycle_mode={self.lifecycle_mode}, "
@@ -213,30 +368,61 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         if has_interactions:
             self.logger.info("GazeObjectInteraction available, will use Visit-based association")
         
-        # Process detections frame by frame
-        self._track_instances_across_frames(session)
+        # Process detections frame by frame with error handling
+        try:
+            self._track_instances_across_frames(session)
+            self.logger.info(f"Successfully tracked {len(self.tracked_instances)} instances across frames")
+        except Exception as e:
+            error_msg = f"Failed to track instances across frames: {e}"
+            self.logger.error(error_msg)
+            return {"error": error_msg}
         
         # Associate with gaze clusters if available
         if has_clusters:
-            self._associate_with_gaze_clusters(session, deps)
+            try:
+                self._associate_with_gaze_clusters(session, deps)
+                self.logger.info("Successfully associated instances with gaze clusters")
+            except Exception as e:
+                self.logger.warning(f"Failed to associate with gaze clusters: {e}")
+                has_clusters = False  # Continue without cluster association
         else:
             self._association_method = 'none'
         
         # Calculate 3D bounding boxes for well-attended objects
-        self._calculate_3d_bounding_boxes(session, deps)
+        try:
+            bbox_count = self._calculate_3d_bounding_boxes(session, deps)
+            self.logger.info(f"Successfully calculated 3D bounding boxes for {bbox_count} instances")
+        except Exception as e:
+            self.logger.warning(f"Failed to calculate 3D bounding boxes: {e}")
+            # Continue without 3D bounding boxes
         
-        # Calculate metrics
-        metrics = self._calculate_tracking_metrics()
+        # Calculate metrics with error handling
+        try:
+            metrics = self._calculate_tracking_metrics()
+            self.logger.info("Successfully calculated tracking metrics")
+        except Exception as e:
+            self.logger.error(f"Failed to calculate tracking metrics: {e}")
+            # Return basic metrics if calculation fails
+            metrics = {
+                "tracked_instances": self.tracked_instances,
+                "metrics": {"total_instances": len(self.tracked_instances)},
+                "error": f"Metrics calculation failed: {e}"
+            }
         
         # Store results in session
         session.object_instances = self.tracked_instances
         session.set_plugin_result('ObjectInstanceTracker', metrics)
         
-        # Generate report
-        self._generate_tracking_report(metrics, session)
+        # Generate reports with error handling
+        try:
+            self._generate_tracking_report(metrics, session)
+        except Exception as e:
+            self.logger.warning(f"Failed to generate tracking report: {e}")
         
-        # Generate CSV reports
-        self._generate_csv_reports(metrics, session)
+        try:
+            self._generate_csv_reports(metrics, session)
+        except Exception as e:
+            self.logger.warning(f"Failed to generate CSV reports: {e}")
         
         return metrics
     
@@ -978,6 +1164,107 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 # Set timeline to this timestamp
                 rr.set_time("timestamp", timestamp=timestamp / 1e9)
                 self._log_instances_batch(visible_instances, get_coco_class_color, get_coco_class_id)
+    
+    def _extract_visit_timeline(self, results: Dict) -> Dict[str, List[Dict]]:
+        """Extract visit timeline from results, organized by object class.
+        
+        Args:
+            results: Plugin results containing tracked instances with visit associations
+            
+        Returns:
+            Dictionary mapping class_name -> list of visit periods with timestamps
+        """
+        visit_timeline = {}
+        
+        # Extract visits from tracked instances (which have association with visits)
+        for instance_id, instance in results['tracked_instances'].items():
+            if hasattr(instance, 'associated_clusters') and instance.associated_clusters:
+                class_name = instance.class_name
+                
+                # For each detection of this instance, create a visit period
+                for detection in instance.detections:
+                    visit_period = {
+                        'instance_id': instance_id,
+                        'instance': instance,
+                        'start_timestamp': detection.timestamp - self.visit_padding_ms * 1e6,  # Add padding before
+                        'end_timestamp': detection.timestamp + self.gaze_time_window_ms * 1e6 + self.visit_padding_ms * 1e6,  # Add padding after
+                        'detection': detection
+                    }
+                    
+                    if class_name not in visit_timeline:
+                        visit_timeline[class_name] = []
+                    visit_timeline[class_name].append(visit_period)
+        
+        # Merge overlapping visits for the same class
+        for class_name in visit_timeline:
+            visit_timeline[class_name] = self._merge_overlapping_visits(visit_timeline[class_name])
+        
+        return visit_timeline
+    
+    def _merge_overlapping_visits(self, visits: List[Dict]) -> List[Dict]:
+        """Merge overlapping visit periods for the same class.
+        
+        Args:
+            visits: List of visit periods sorted by start time
+            
+        Returns:
+            List of merged visit periods
+        """
+        if not visits:
+            return []
+        
+        # Sort visits by start timestamp
+        sorted_visits = sorted(visits, key=lambda x: x['start_timestamp'])
+        merged = [sorted_visits[0]]
+        
+        for current in sorted_visits[1:]:
+            last_merged = merged[-1]
+            
+            # If current visit overlaps with last merged, extend the end time
+            if current['start_timestamp'] <= last_merged['end_timestamp']:
+                last_merged['end_timestamp'] = max(last_merged['end_timestamp'], current['end_timestamp'])
+                # Keep the instance with more associated clusters (better quality)
+                if len(current['instance'].associated_clusters) > len(last_merged['instance'].associated_clusters):
+                    last_merged['instance'] = current['instance']
+                    last_merged['instance_id'] = current['instance_id']
+            else:
+                merged.append(current)
+        
+        return merged
+    
+    def _build_visit_visibility(self, instances_3d: List[Dict], visit_timeline: Dict[str, List[Dict]]) -> Dict[int, List[Dict]]:
+        """Build visibility timeline based on visit periods.
+        
+        Args:
+            instances_3d: List of 3D instance data
+            visit_timeline: Visit periods organized by class
+            
+        Returns:
+            Dictionary mapping timestamp -> list of visible instances
+        """
+        visibility = {}
+        
+        # For each instance, find corresponding visits
+        for item in instances_3d:
+            instance = item['instance']
+            class_name = item['class_name']
+            
+            if class_name in visit_timeline:
+                # Find visits that match this instance
+                for visit in visit_timeline[class_name]:
+                    if visit['instance_id'] == item['instance_id']:
+                        # Add instance to all timestamps during the visit
+                        current_time = visit['start_timestamp']
+                        while current_time <= visit['end_timestamp']:
+                            if current_time not in visibility:
+                                visibility[current_time] = []
+                            if item not in visibility[current_time]:
+                                visibility[current_time].append(item)
+                            
+                            # Move to next frame (approximate 33ms for 30fps)
+                            current_time += 33 * 1e6  # 33ms in nanoseconds
+        
+        return visibility
     
     def _log_instances_batch(self, instances: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
         """Helper method to log a batch of instances at the current timeline timestamp.
