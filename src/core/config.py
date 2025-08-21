@@ -76,7 +76,8 @@ class VisualizationConfig:
     enabled_plugins: List[str] = field(default_factory=lambda: [
         "fixation_detector",
         "Gaze3DHeatmap",
-        "Gaze3DClustering"
+        "Gaze3DClustering",
+        "ObjectInstanceTracker"
     ])
     
     plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
@@ -123,9 +124,15 @@ class VisualizationConfig:
         },
         "ObjectInstanceTracker": {
             "enabled": True,
-            "iou_threshold": 0.3,  # IoU threshold for matching objects
-            "max_frame_gap": 10,  # Max frames between detections
-            "min_detections": 3,  # Min detections to confirm instance
+            "iou_threshold": 0.3,  # IoU threshold for matching objects across frames
+            "max_frame_gap": 10,  # Max frames between detections before considering instance lost
+            "min_confidence": 0.5,  # Minimum detection confidence to track
+            "min_gaze_points": 50,  # Min gaze points for 3D bbox calculation
+            "gaze_time_window_ms": 100,  # Time window for gaze aggregation (ms)
+            "generate_reports": True,  # Generate CSV reports
+            "show_3d_boxes": True,  # Show 3D bounding boxes in Rerun
+            "box_opacity": 0.4,  # 3D bounding box opacity
+            "instance_colors": True,  # Use per-instance colors
             "cluster_distance_m": 0.5  # Max distance to associate with gaze cluster
         }
     })

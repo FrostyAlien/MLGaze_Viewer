@@ -6,6 +6,7 @@ from .object_detector import ObjectDetector
 from .gaze_object_interaction import GazeObjectInteraction
 from .gaze_3d_heatmap import Gaze3DHeatmap
 from .gaze_3d_clustering import Gaze3DClustering
+from .object_instance_tracker import ObjectInstanceTracker
 
 __all__ = [
     "AnalyticsPlugin", 
@@ -13,7 +14,8 @@ __all__ = [
     "ObjectDetector", 
     "GazeObjectInteraction",
     "Gaze3DHeatmap",
-    "Gaze3DClustering"
+    "Gaze3DClustering",
+    "ObjectInstanceTracker"
 ]
 
 
@@ -40,6 +42,8 @@ def load_plugins(plugin_names: list) -> list:
             plugins.append(Gaze3DHeatmap())
         elif name == "Gaze3DClustering":
             plugins.append(Gaze3DClustering())
+        elif name == "ObjectInstanceTracker":
+            plugins.append(ObjectInstanceTracker())
         # Add more plugins here as they are implemented
     
     return plugins

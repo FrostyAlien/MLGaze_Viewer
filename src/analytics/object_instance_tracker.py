@@ -120,6 +120,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         self.min_gaze_points = plugin_config.get('min_gaze_points', 50)  # Min points for 3D bbox
         self.min_cluster_quality = plugin_config.get('min_cluster_quality', 0.5)
         self.min_gaze_duration_ms = plugin_config.get('min_gaze_duration_ms', 200)
+        self.gaze_time_window_ms = plugin_config.get('gaze_time_window_ms', 100)  # Time window for gaze collection
         self.gaze_state_filter = plugin_config.get('gaze_state_filter', ['Fixation', 'Pursuit'])
         self.bbox_padding_m = plugin_config.get('bbox_padding_m', 0.1)  # 10cm padding
         self.outlier_method = plugin_config.get('outlier_method', 'iqr')
@@ -141,15 +142,22 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             self.logger.warning("No detected objects available for instance tracking")
             return self._create_empty_results()
         
-        # Store detected objects in session for compatibility
-        if hasattr(detector_results, 'get') and 'detected_objects' in detector_results:
-            session.detected_objects = detector_results['detected_objects']
-        elif not hasattr(session, 'detected_objects'):
-            session.detected_objects = []
-        
-        if not session.detected_objects:
+        # Check if session has detection data
+        if not hasattr(session, 'detections') or not session.detections:
             self.logger.warning("No detected objects found in session")
             return self._create_empty_results()
+        
+        # Count total detections across all cameras
+        total_detections = 0
+        for camera_name, camera_detections in session.detections.items():
+            for frame_id, detections in camera_detections.items():
+                total_detections += len(detections)
+        
+        if total_detections == 0:
+            self.logger.warning("No detected objects found in session")
+            return self._create_empty_results()
+        
+        self.logger.info(f"Found {total_detections} total detections across {len(session.detections)} cameras")
         
         # Check optional dependencies
         has_clusters = "Gaze3DClustering" in deps and "error" not in deps.get("Gaze3DClustering", {})
@@ -193,21 +201,30 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         Args:
             session: SessionData with detected objects organized by frame
         """
-        # Group detections by frame
+        # Collect all detections across all cameras and organize by timestamp
+        all_detections = []
         frames_with_detections = defaultdict(list)
-        for det in session.detected_objects:
-            frames_with_detections[det.frame_id].append(det)
         
-        # Sort frames chronologically
-        sorted_frames = sorted(frames_with_detections.keys())
+        for camera_name, camera_detections in session.detections.items():
+            for frame_id, detections in camera_detections.items():
+                for detection in detections:
+                    # Add camera context to detection
+                    detection.camera_name = camera_name
+                    all_detections.append(detection)
+                    # Use timestamp as the key for chronological sorting
+                    frames_with_detections[detection.timestamp].append(detection)
         
-        self.logger.info(f"Tracking objects across {len(sorted_frames)} frames")
+        # Sort frames chronologically by timestamp
+        sorted_timestamps = sorted(frames_with_detections.keys())
+        
+        self.logger.info(f"Tracking {len(all_detections)} detections across {len(sorted_timestamps)} timestamps")
         
         # Track frame by frame
         active_instances = {}  # Maps instance_id to last detection
+        frame_gaps = {}  # Track how long each instance has been missing
         
-        for frame_id in sorted_frames:
-            detections = frames_with_detections[frame_id]
+        for timestamp in sorted_timestamps:
+            detections = frames_with_detections[timestamp]
             matched_instances = set()  # Track which instances were matched this frame
             
             for det in detections:
@@ -223,19 +240,28 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                     instance.frame_count += 1
                     active_instances[best_match_id] = det
                     matched_instances.add(best_match_id)
+                    # Reset frame gap counter
+                    frame_gaps.pop(best_match_id, None)
                 else:
                     # Create new instance
                     instance_id = self._create_new_instance(det)
                     active_instances[instance_id] = det
                     matched_instances.add(instance_id)
             
-            # Remove instances that weren't matched (could be inactive)
-            # Keep only matched instances as active
-            active_instances = {iid: det for iid, det in active_instances.items() 
-                              if iid in matched_instances}
-            
-            # Clean up inactive instances
-            self._cleanup_inactive_instances()
+            # Update frame gaps for unmatched instances
+            for instance_id in list(active_instances.keys()):
+                if instance_id not in matched_instances:
+                    frame_gaps[instance_id] = frame_gaps.get(instance_id, 0) + 1
+                    
+                    # Remove instances that have been missing too long
+                    if frame_gaps[instance_id] > self.max_frame_gap:
+                        active_instances.pop(instance_id, None)
+                        frame_gaps.pop(instance_id, None)
+        
+        self.logger.info(f"Created {len(self.tracked_instances)} total object instances")
+        
+        # Clean up inactive instances
+        self._cleanup_inactive_instances()
     
     def _find_best_match(self, detection: DetectedObject, 
                         active_instances: Dict[int, DetectedObject]) -> Optional[int]:
@@ -673,7 +699,10 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         session.tracking_report = report
     
     def visualize(self, results: Dict, rr_stream=None) -> None:
-        """Visualize tracked instances in Rerun with both 2D and 3D representations.
+        """Visualize tracked instances in Rerun with consolidated entity paths.
+        
+        Uses batch logging to consolidate all instances under organized 3D world space paths
+        instead of creating individual entity paths for each instance.
         
         Args:
             results: Results from process method
@@ -685,12 +714,22 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         
         from src.core.data_types import get_coco_class_color, get_coco_class_id
         
-        visualized_3d = 0
+        # Organize instances by class for efficient batching
+        instances_by_class = {}
+        instances_3d = []
+        trajectories_2d = {}
         
-        # Log instance trajectories and 3D bounding boxes
         for instance_id, instance in results['tracked_instances'].items():
-            # 2D trajectory for RGB frames (always shown)
+            class_name = instance.class_name
+            if class_name not in instances_by_class:
+                instances_by_class[class_name] = []
+            instances_by_class[class_name].append((instance_id, instance))
+            
+            # Collect 2D trajectories by class
             if len(instance.detections) > 1:
+                if class_name not in trajectories_2d:
+                    trajectories_2d[class_name] = []
+                
                 # Extract center points of bounding boxes
                 centers = []
                 for det in instance.detections:
@@ -698,35 +737,70 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                     center_y = det.bbox.y + det.bbox.height / 2
                     centers.append([center_x, center_y])
                 
-                # Log as 2D trajectory
-                entity_path_2d = f"/tracking/instances/{instance.class_name}_{instance_id}"
-                
-                rr.log(
-                    entity_path_2d,
-                    rr.LineStrips2D([centers]),
-                    static=True
-                )
-                
-                # Log instance info for 2D
-                rr.log(
-                    f"{entity_path_2d}/info",
-                    rr.TextDocument(
-                        f"Instance {instance_id}\n"
-                        f"Class: {instance.class_name}\n"
-                        f"Frames: {instance.frame_count}\n"
-                        f"Avg Confidence: {instance.avg_confidence:.2f}\n"
-                        f"Duration: {instance.duration_ms:.1f} ms\n"
-                        f"Gaze Clusters: {len(instance.associated_clusters)}"
-                    ),
-                    static=True
-                )
+                trajectories_2d[class_name].append({
+                    'instance_id': instance_id,
+                    'centers': centers,
+                    'metadata': {
+                        'instance_id': instance_id,
+                        'frames': instance.frame_count,
+                        'confidence': instance.avg_confidence,
+                        'duration_ms': instance.duration_ms,
+                        'clusters': len(instance.associated_clusters)
+                    }
+                })
             
-            # 3D visualization for well-attended objects
+            # Collect 3D instances
             if hasattr(instance, 'bbox_3d') and instance.bbox_3d is not None:
-                entity_path_3d = f"/world/objects/tracked/{instance.class_name}_{instance_id}"
+                instances_3d.append({
+                    'instance_id': instance_id,
+                    'instance': instance,
+                    'class_name': class_name
+                })
+        
+        # Log 2D trajectories consolidated by class
+        for class_name, class_trajectories in trajectories_2d.items():
+            if not class_trajectories:
+                continue
+                
+            sanitized_name = self._sanitize_class_name_for_path(class_name)
+            
+            # Batch all trajectories for this class
+            line_strips = [traj['centers'] for traj in class_trajectories]
+            
+            rr.log(
+                f"/tracking/2d_trajectories/{sanitized_name}",
+                rr.LineStrips2D(line_strips),
+                rr.AnyValues(
+                    instance_id=[traj['metadata']['instance_id'] for traj in class_trajectories],
+                    frames=[traj['metadata']['frames'] for traj in class_trajectories],
+                    confidence=[traj['metadata']['confidence'] for traj in class_trajectories],
+                    duration_ms=[traj['metadata']['duration_ms'] for traj in class_trajectories],
+                    gaze_clusters=[traj['metadata']['clusters'] for traj in class_trajectories]
+                ),
+                static=True
+            )
+        
+        # Log 3D objects consolidated under single world space path
+        if instances_3d:
+            centers_3d = []
+            half_sizes_3d = []
+            colors_3d = []
+            instance_metadata = {
+                'instance_id': [],
+                'class_name': [],
+                'confidence': [],
+                'gaze_quality': [],
+                'gaze_points': [],
+                'duration_ms': []
+            }
+            
+            for item in instances_3d:
+                instance_id = item['instance_id']
+                instance = item['instance']
+                class_name = item['class_name']
                 
                 # Get class color
-                class_id = get_coco_class_id(instance.class_name)
+                class_id = get_coco_class_id(class_name)
                 color = get_coco_class_color(class_id)
                 
                 # Adjust opacity based on gaze quality
@@ -736,49 +810,49 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                     opacity = 200
                 color_with_alpha = [color[0], color[1], color[2], opacity]
                 
-                # Log 3D bounding box
-                rr.log(
-                    f"{entity_path_3d}/bbox_3d",
-                    rr.Boxes3D(
-                        centers=[instance.bbox_3d['center']],
-                        half_sizes=[instance.bbox_3d['half_sizes']],
-                        colors=[color_with_alpha],
-                        fill_mode="wireframe"
-                    ),
-                    static=False
-                )
+                centers_3d.append(instance.bbox_3d['center'])
+                half_sizes_3d.append(instance.bbox_3d['half_sizes'])
+                colors_3d.append(color_with_alpha)
                 
-                # Log centroid
-                rr.log(
-                    f"{entity_path_3d}/centroid",
-                    rr.Points3D(
-                        positions=[instance.bbox_3d['center']],
-                        colors=[color],
-                        radii=0.02
-                    ),
-                    static=False
-                )
-                
-                # Log 3D info
-                info_text = (
-                    f"Instance {instance_id}\n"
-                    f"Class: {instance.class_name}\n"
-                    f"Confidence: {instance.avg_confidence:.2f}\n"
-                    f"Gaze Points: {instance.gaze_point_count}\n"
-                    f"Gaze Quality: {instance.gaze_quality:.2f}\n"
-                    f"Duration: {instance.duration_ms:.1f} ms"
-                )
-                
-                rr.log(
-                    f"{entity_path_3d}/info",
-                    rr.TextDocument(info_text),
-                    static=False
-                )
-                
-                visualized_3d += 1
+                # Collect metadata
+                instance_metadata['instance_id'].append(instance_id)
+                instance_metadata['class_name'].append(class_name)
+                instance_metadata['confidence'].append(instance.avg_confidence)
+                instance_metadata['gaze_quality'].append(getattr(instance, 'gaze_quality', 0.0))
+                instance_metadata['gaze_points'].append(getattr(instance, 'gaze_point_count', 0))
+                instance_metadata['duration_ms'].append(instance.duration_ms)
+            
+            # Log all 3D bounding boxes in a single consolidated entity
+            rr.log(
+                "/world/objects/tracked_instances",
+                rr.Boxes3D(
+                    centers=centers_3d,
+                    half_sizes=half_sizes_3d,
+                    colors=colors_3d,
+                    fill_mode="DenseWireframe"
+                ),
+                rr.AnyValues(**instance_metadata),
+                static=False
+            )
+            
+            # Log consolidated centroids for easier visualization
+            rr.log(
+                "/world/objects/tracked_centroids",
+                rr.Points3D(
+                    positions=centers_3d,
+                    colors=[color[:3] for color in colors_3d],  # Remove alpha for points
+                    radii=0.02
+                ),
+                rr.AnyValues(**instance_metadata),
+                static=False
+            )
         
-        self.logger.info(f"Visualized {len(results['tracked_instances'])} instances "
-                        f"(2D: all, 3D: {visualized_3d} well-attended)")
+        visualized_3d = len(instances_3d)
+        num_2d_trajectories = sum(len(trajs) for trajs in trajectories_2d.values())
+        
+        self.logger.info(f"Visualized tracked instances in consolidated paths: "
+                        f"2D trajectories: {num_2d_trajectories} across {len(trajectories_2d)} classes, "
+                        f"3D objects: {visualized_3d} instances consolidated into 2 entity paths")
     
     def _calculate_3d_bounding_boxes(self, session: SessionData, deps: Dict) -> None:
         """Calculate 3D bounding boxes for well-attended instances.
@@ -799,9 +873,11 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             
             for det in instance.detections:
                 # Get gaze points for this detection's timestamp
+                # Convert ms to nanoseconds
+                time_window_ns = self.gaze_time_window_ms * 1e6
                 frame_gaze = session.gaze[
-                    (session.gaze['timestamp'] >= det.timestamp - 1e8) &  # 100ms window
-                    (session.gaze['timestamp'] <= det.timestamp + 1e8)
+                    (session.gaze['timestamp'] >= det.timestamp - time_window_ns) &
+                    (session.gaze['timestamp'] <= det.timestamp + time_window_ns)
                 ]
                 
                 if frame_gaze.empty:
@@ -819,9 +895,18 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                     # Get 3D position
                     if 'gazePositionX' in gaze_row and 'gazePositionY' in gaze_row and 'gazePositionZ' in gaze_row:
                         pos_3d = [gaze_row['gazePositionX'], gaze_row['gazePositionY'], gaze_row['gazePositionZ']]
-                        # Convert to Rerun coordinates
-                        rerun_pos = unity_to_rerun_position(pos_3d)
-                        gaze_points_3d.append(rerun_pos)
+                        
+                        # Check for NaN/Inf values
+                        if not all(np.isfinite(pos_3d)):
+                            continue
+                        
+                        try:
+                            # Convert to Rerun coordinates
+                            rerun_pos = unity_to_rerun_position(pos_3d)
+                            gaze_points_3d.append(rerun_pos)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to convert gaze position {pos_3d}: {e}")
+                            continue
             
             # Check if we have enough points for reliable 3D bbox
             if len(gaze_points_3d) < self.min_gaze_points:
@@ -845,10 +930,25 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 instance.gaze_quality = 0.5
             
             # Calculate 3D bounding box from gaze points
-            bbox_3d = self._compute_gaze_based_bbox(instance, gaze_points_3d)
-            if bbox_3d is not None:
-                instance.bbox_3d = bbox_3d
-                instance.gaze_point_count = len(gaze_points_3d)
+            try:
+                bbox_3d = self._compute_gaze_based_bbox(instance, gaze_points_3d)
+                if bbox_3d is not None:
+                    instance.bbox_3d = bbox_3d
+                    instance.gaze_point_count = len(gaze_points_3d)
+            except Exception as e:
+                self.logger.warning(f"Failed to compute 3D bbox for instance {instance_id}: {e}")
+                continue
+    
+    def _sanitize_class_name_for_path(self, class_name: str) -> str:
+        """Sanitize class name for use in entity paths by replacing spaces with underscores.
+        
+        Args:
+            class_name: Original class name (may contain spaces)
+            
+        Returns:
+            Sanitized class name suitable for entity paths
+        """
+        return class_name.replace(" ", "_")
     
     def _compute_gaze_based_bbox(self, instance: TrackedInstance, gaze_points: List[np.ndarray]) -> Optional[Dict]:
         """Compute 3D bounding box from gaze points.

@@ -535,6 +535,55 @@ class MLGazeConfigApp(App):
                 value="0.3",
                 id="clustering_bound_opacity"
             )
+        
+        # Object Instance Tracker Section
+        yield Static("Object Instance Tracker", classes="section-title")
+        with Container(classes="section-content"):
+            yield Checkbox("Enable Object Instance Tracker", value=True, id="enable_instance_tracker")
+            yield Checkbox("Show 3D Bounding Boxes", value=True, id="instance_show_3d_boxes")
+            yield Checkbox("Generate CSV Reports", value=True, id="instance_generate_reports")
+            
+            yield Static("IoU Threshold (0.1-0.9):")
+            yield Input(
+                placeholder="0.3",
+                value="0.3",
+                id="instance_iou_threshold"
+            )
+            
+            yield Static("Max Frame Gap (1-30):")
+            yield Input(
+                placeholder="10",
+                value="10",
+                id="instance_max_frame_gap"
+            )
+            
+            yield Static("Min Confidence (0.1-1.0):")
+            yield Input(
+                placeholder="0.5",
+                value="0.5",
+                id="instance_min_confidence"
+            )
+            
+            yield Static("Min Gaze Points for 3D Bbox (10-200):")
+            yield Input(
+                placeholder="50",
+                value="50",
+                id="instance_min_gaze_points"
+            )
+            
+            yield Static("Gaze Time Window (ms) (50-500):")
+            yield Input(
+                placeholder="100",
+                value="100",
+                id="instance_time_window"
+            )
+            
+            yield Static("3D Box Opacity (0.1-1.0):")
+            yield Input(
+                placeholder="0.4",
+                value="0.4",
+                id="instance_box_opacity"
+            )
     
     def _create_gaze_state_filter_section(self):
         """Create the gaze state filter configuration section."""
@@ -854,8 +903,17 @@ class MLGazeConfigApp(App):
                 self.config.enabled_plugins.append("Gaze3DClustering")
         elif checkbox_id == "clustering_show_bounds":
             self.config.plugin_configs["Gaze3DClustering"]["show_bounds"] = value
+        elif checkbox_id == "enable_instance_tracker":
+            if "ObjectInstanceTracker" in self.config.enabled_plugins and not value:
+                self.config.enabled_plugins.remove("ObjectInstanceTracker")
+            elif "ObjectInstanceTracker" not in self.config.enabled_plugins and value:
+                self.config.enabled_plugins.append("ObjectInstanceTracker")
+        elif checkbox_id == "instance_show_3d_boxes":
+            self.config.plugin_configs["ObjectInstanceTracker"]["show_3d_boxes"] = value
+        elif checkbox_id == "instance_generate_reports":
+            self.config.plugin_configs["ObjectInstanceTracker"]["generate_reports"] = value
         elif checkbox_id == "enable_gaze_filter":
-            # Apply filter enabled state to both spatial plugins
+            # Apply filter enabled state to spatial plugins
             self.config.plugin_configs["Gaze3DHeatmap"]["filter_enabled"] = value
             self.config.plugin_configs["Gaze3DClustering"]["filter_enabled"] = value
     
@@ -1028,6 +1086,43 @@ class MLGazeConfigApp(App):
                     opacity = float(value)
                     if 0.1 <= opacity <= 1.0:
                         self.config.plugin_configs["Gaze3DClustering"]["bound_opacity"] = opacity
+            
+            # Object Instance Tracker Parameters
+            elif input_id == "instance_iou_threshold":
+                if value:
+                    iou_threshold = float(value)
+                    if 0.1 <= iou_threshold <= 0.9:
+                        self.config.plugin_configs["ObjectInstanceTracker"]["iou_threshold"] = iou_threshold
+                        
+            elif input_id == "instance_max_frame_gap":
+                if value:
+                    max_frame_gap = int(value)
+                    if 1 <= max_frame_gap <= 30:
+                        self.config.plugin_configs["ObjectInstanceTracker"]["max_frame_gap"] = max_frame_gap
+                        
+            elif input_id == "instance_min_confidence":
+                if value:
+                    min_confidence = float(value)
+                    if 0.1 <= min_confidence <= 1.0:
+                        self.config.plugin_configs["ObjectInstanceTracker"]["min_confidence"] = min_confidence
+                        
+            elif input_id == "instance_min_gaze_points":
+                if value:
+                    min_gaze_points = int(value)
+                    if 10 <= min_gaze_points <= 200:
+                        self.config.plugin_configs["ObjectInstanceTracker"]["min_gaze_points"] = min_gaze_points
+                        
+            elif input_id == "instance_time_window":
+                if value:
+                    time_window = int(value)
+                    if 50 <= time_window <= 500:
+                        self.config.plugin_configs["ObjectInstanceTracker"]["gaze_time_window_ms"] = time_window
+                        
+            elif input_id == "instance_box_opacity":
+                if value:
+                    box_opacity = float(value)
+                    if 0.1 <= box_opacity <= 1.0:
+                        self.config.plugin_configs["ObjectInstanceTracker"]["box_opacity"] = box_opacity
                     
         except ValueError as e:
             if "fade_duration" in input_id:

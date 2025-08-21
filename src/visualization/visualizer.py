@@ -14,11 +14,13 @@ from src.utils.logger import MLGazeLogger
 try:
     from src.analytics.object_detector import ObjectDetector
     from src.analytics.gaze_object_interaction import GazeObjectInteraction
+    from src.analytics.object_instance_tracker import ObjectInstanceTracker
     OBJECT_DETECTION_AVAILABLE = True
 except ImportError:
     OBJECT_DETECTION_AVAILABLE = False
     ObjectDetector = None
     GazeObjectInteraction = None
+    ObjectInstanceTracker = None
 
 
 class RerunVisualizer:
@@ -198,6 +200,17 @@ class RerunVisualizer:
                             )
                             self.add_plugin(gaze_interaction)
                             print("✓ GazeObjectInteraction auto-loaded for gaze-object analysis")
+                    
+                    # Auto-load ObjectInstanceTracker for spatial analysis
+                    if ObjectInstanceTracker:
+                        has_instance_tracker = any(
+                            isinstance(plugin, ObjectInstanceTracker) for plugin in self.plugins
+                        )
+                        
+                        if not has_instance_tracker:
+                            instance_tracker = ObjectInstanceTracker()
+                            self.add_plugin(instance_tracker)
+                            print("✓ ObjectInstanceTracker auto-loaded for spatial object tracking")
                     
                 except Exception as e:
                     print(f"Warning: Failed to auto-load ObjectDetector: {e}")
