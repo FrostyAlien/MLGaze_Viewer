@@ -208,8 +208,8 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         for camera_name, camera_detections in session.detections.items():
             for frame_id, detections in camera_detections.items():
                 for detection in detections:
-                    # Add camera context to detection
-                    detection.camera_name = camera_name
+                    # Camera context should already be set during detection
+                    # Do not overwrite existing camera_name to prevent tracking issues
                     all_detections.append(detection)
                     # Use timestamp as the key for chronological sorting
                     frames_with_detections[detection.timestamp].append(detection)
@@ -282,15 +282,15 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             if prev_det.class_name != detection.class_name:
                 continue
             
-            # Check temporal proximity (same camera)
-            if prev_det.camera_name != detection.camera_name:
-                continue
+            # Prefer same camera, but don't strictly require it for cross-camera tracking
+            camera_match_bonus = 1.0 if prev_det.camera_name == detection.camera_name else 0.8
             
-            # Calculate IoU
+            # Calculate IoU with camera preference bonus
             iou = self._calculate_iou(prev_det.bbox, detection.bbox)
+            weighted_iou = iou * camera_match_bonus
             
-            if iou > self.iou_threshold and iou > best_iou:
-                best_iou = iou
+            if weighted_iou > self.iou_threshold and weighted_iou > best_iou:
+                best_iou = weighted_iou
                 best_instance_id = instance_id
         
         return best_instance_id
@@ -699,10 +699,11 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         session.tracking_report = report
     
     def visualize(self, results: Dict, rr_stream=None) -> None:
-        """Visualize tracked instances in Rerun with consolidated entity paths.
+        """Visualize tracked instances in Rerun with consolidated entity paths and proper temporal logging.
         
         Uses batch logging to consolidate all instances under organized 3D world space paths
-        instead of creating individual entity paths for each instance.
+        instead of creating individual entity paths for each instance. Objects appear at their
+        correct detection timestamps throughout the session.
         
         Args:
             results: Results from process method
@@ -780,8 +781,48 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 static=True
             )
         
-        # Log 3D objects consolidated under single world space path
+        # Log 3D objects with proper temporal visualization
         if instances_3d:
+            self._visualize_3d_objects_temporally(instances_3d, get_coco_class_color, get_coco_class_id)
+        
+        visualized_3d = len(instances_3d)
+        num_2d_trajectories = sum(len(trajs) for trajs in trajectories_2d.values())
+        
+        self.logger.info(f"Visualized tracked instances in consolidated paths: "
+                        f"2D trajectories: {num_2d_trajectories} across {len(trajectories_2d)} classes, "
+                        f"3D objects: {visualized_3d} instances with temporal logging")
+    
+    def _visualize_3d_objects_temporally(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
+        """Visualize 3D objects with proper temporal logging.
+        
+        Objects appear at their detection timestamps instead of all at once.
+        
+        Args:
+            instances_3d: List of 3D instance data
+            get_coco_class_color: Function to get COCO class colors
+            get_coco_class_id: Function to get COCO class IDs
+        """
+        # Collect all timestamps where objects are visible
+        visibility_by_timestamp = {}  # timestamp -> list of visible instances
+        
+        for item in instances_3d:
+            instance = item['instance']
+            
+            # Add instance to all timestamps during its lifetime
+            for detection in instance.detections:
+                timestamp = detection.timestamp
+                if timestamp not in visibility_by_timestamp:
+                    visibility_by_timestamp[timestamp] = []
+                visibility_by_timestamp[timestamp].append(item)
+        
+        # Log objects at each timestamp where they appear
+        for timestamp in sorted(visibility_by_timestamp.keys()):
+            visible_instances = visibility_by_timestamp[timestamp]
+            
+            # Set timeline to this timestamp (convert nanoseconds to seconds)
+            rr.set_time("timestamp", timestamp=timestamp / 1e9)
+            
+            # Prepare batch data for all visible instances at this timestamp
             centers_3d = []
             half_sizes_3d = []
             colors_3d = []
@@ -794,7 +835,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 'duration_ms': []
             }
             
-            for item in instances_3d:
+            for item in visible_instances:
                 instance_id = item['instance_id']
                 instance = item['instance']
                 class_name = item['class_name']
@@ -822,37 +863,31 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 instance_metadata['gaze_points'].append(getattr(instance, 'gaze_point_count', 0))
                 instance_metadata['duration_ms'].append(instance.duration_ms)
             
-            # Log all 3D bounding boxes in a single consolidated entity
-            rr.log(
-                "/world/objects/tracked_instances",
-                rr.Boxes3D(
-                    centers=centers_3d,
-                    half_sizes=half_sizes_3d,
-                    colors=colors_3d,
-                    fill_mode="DenseWireframe"
-                ),
-                rr.AnyValues(**instance_metadata),
-                static=False
-            )
-            
-            # Log consolidated centroids for easier visualization
-            rr.log(
-                "/world/objects/tracked_centroids",
-                rr.Points3D(
-                    positions=centers_3d,
-                    colors=[color[:3] for color in colors_3d],  # Remove alpha for points
-                    radii=0.02
-                ),
-                rr.AnyValues(**instance_metadata),
-                static=False
-            )
-        
-        visualized_3d = len(instances_3d)
-        num_2d_trajectories = sum(len(trajs) for trajs in trajectories_2d.values())
-        
-        self.logger.info(f"Visualized tracked instances in consolidated paths: "
-                        f"2D trajectories: {num_2d_trajectories} across {len(trajectories_2d)} classes, "
-                        f"3D objects: {visualized_3d} instances consolidated into 2 entity paths")
+            # Log all visible instances at this timestamp
+            if centers_3d:  # Only log if there are instances to show
+                rr.log(
+                    "/world/objects/tracked_instances",
+                    rr.Boxes3D(
+                        centers=centers_3d,
+                        half_sizes=half_sizes_3d,
+                        colors=colors_3d,
+                        fill_mode="DenseWireframe"
+                    ),
+                    rr.AnyValues(**instance_metadata),
+                    static=False
+                )
+                
+                # Log consolidated centroids for easier visualization
+                rr.log(
+                    "/world/objects/tracked_centroids",
+                    rr.Points3D(
+                        positions=centers_3d,
+                        colors=[color[:3] for color in colors_3d],  # Remove alpha for points
+                        radii=0.02
+                    ),
+                    rr.AnyValues(**instance_metadata),
+                    static=False
+                )
     
     def _calculate_3d_bounding_boxes(self, session: SessionData, deps: Dict) -> None:
         """Calculate 3D bounding boxes for well-attended instances.
