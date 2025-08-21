@@ -370,39 +370,29 @@ class MLGazeConfigApp(App):
         self.config.primary_camera = ""
     
     def _update_tracking_cameras_selection(self, clear: bool = False) -> None:
-        """Update tracking cameras SelectionList by replacing the widget.
+        """Update tracking cameras SelectionList using built-in option methods.
         
         Args:
-            clear: If True, create empty SelectionList. If False, populate with cameras.
+            clear: If True, clear all options. If False, populate with cameras.
         """
         try:
-            # Get the container for the SelectionList
-            container = self.query_one("#instance_tracking_cameras_container")
+            # Get the existing SelectionList widget
+            selection_list = self.query_one("#instance_tracking_cameras", SelectionList)
             
-            # Remove the old SelectionList if it exists
-            try:
-                old_list = container.query_one("#instance_tracking_cameras")
-                old_list.remove()
-            except:
-                pass  # Widget might not exist yet
+            # Clear existing options
+            selection_list.clear_options()
             
-            if clear or not self.cameras:
-                # Create empty SelectionList when clearing or no cameras
-                new_list = SelectionList(id="instance_tracking_cameras")
-            else:
-                # Create SelectionList with camera options (all selected by default)
+            if not clear and self.cameras:
+                # Add camera options (all selected by default)
                 camera_options = [(camera_name, camera_name) for camera_name in self.cameras]
-                new_list = SelectionList(*camera_options, id="instance_tracking_cameras")
+                selection_list.add_options(camera_options)
                 
                 # Select all cameras by default
                 for i in range(len(self.cameras)):
-                    new_list.select(i)
+                    selection_list.select(i)
                 
                 # Initialize config with all cameras
                 self.config.plugin_configs["ObjectInstanceTracker"]["tracking_cameras"] = "all"
-            
-            # Mount the new SelectionList
-            container.mount(new_list)
             
         except Exception as e:
             self.show_error(f"Failed to update tracking cameras selection: {e}")
