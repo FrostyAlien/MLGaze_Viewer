@@ -125,9 +125,10 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         self.bbox_padding_m = plugin_config.get('bbox_padding_m', 0.1)  # 10cm padding
         self.outlier_method = plugin_config.get('outlier_method', 'iqr')
         self.outlier_threshold = plugin_config.get('outlier_threshold', 1.5)
+        self.lifecycle_mode = plugin_config.get('lifecycle_mode', 'persistent')  # persistent, temporal, visit-based
         
         self.logger.info(f"Processing object instance tracking with IoU={self.iou_threshold}, "
-                        f"max_gap={self.max_frame_gap} frames")
+                        f"max_gap={self.max_frame_gap} frames, lifecycle_mode={self.lifecycle_mode}")
         
         # Check required dependencies
         deps = config.get("dependencies", {})
@@ -613,7 +614,8 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 'iou_threshold': self.iou_threshold,
                 'max_frame_gap': self.max_frame_gap,
                 'min_detections': self.min_detections,
-                'cluster_distance_threshold': self.cluster_distance_threshold
+                'cluster_distance_threshold': self.cluster_distance_threshold,
+                'lifecycle_mode': self.lifecycle_mode
             }
         }
     
@@ -640,7 +642,8 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                 'iou_threshold': getattr(self, 'iou_threshold', 0.3),
                 'max_frame_gap': getattr(self, 'max_frame_gap', 10),
                 'min_detections': getattr(self, 'min_detections', 3),
-                'cluster_distance_threshold': getattr(self, 'cluster_distance_threshold', 0.2)
+                'cluster_distance_threshold': getattr(self, 'cluster_distance_threshold', 0.2),
+                'lifecycle_mode': getattr(self, 'lifecycle_mode', 'persistent')
             }
         }
     
@@ -783,7 +786,7 @@ class ObjectInstanceTracker(AnalyticsPlugin):
         
         # Log 3D objects with proper temporal visualization
         if instances_3d:
-            self._visualize_3d_objects_temporally(instances_3d, get_coco_class_color, get_coco_class_id)
+            self._visualize_3d_objects_temporally(instances_3d, get_coco_class_color, get_coco_class_id, results)
         
         visualized_3d = len(instances_3d)
         num_2d_trajectories = sum(len(trajs) for trajs in trajectories_2d.values())
@@ -792,16 +795,44 @@ class ObjectInstanceTracker(AnalyticsPlugin):
                         f"2D trajectories: {num_2d_trajectories} across {len(trajectories_2d)} classes, "
                         f"3D objects: {visualized_3d} instances with temporal logging")
     
-    def _visualize_3d_objects_temporally(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
+    def _visualize_3d_objects_temporally(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id, results: Dict) -> None:
         """Visualize 3D objects with proper temporal logging.
-        
-        Objects appear at their detection timestamps instead of all at once.
         
         Args:
             instances_3d: List of 3D instance data
             get_coco_class_color: Function to get COCO class colors
             get_coco_class_id: Function to get COCO class IDs
+            results: Plugin results containing session data
         """
+        if self.lifecycle_mode == 'persistent':
+            self._visualize_persistent_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+        elif self.lifecycle_mode == 'temporal':
+            self._visualize_temporal_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+        elif self.lifecycle_mode == 'visit-based':
+            self._visualize_visit_based_objects(instances_3d, get_coco_class_color, get_coco_class_id, results)
+        else:
+            # Default to persistent mode
+            self._visualize_persistent_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+    
+    def _visualize_persistent_objects(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
+        """Visualize objects persistently - once detected, they remain visible throughout session."""
+        if not instances_3d:
+            return
+            
+        # Log at first detection timestamp so objects appear early
+        earliest_timestamp = float('inf')
+        for item in instances_3d:
+            instance = item['instance']
+            if instance.detections:
+                earliest_timestamp = min(earliest_timestamp, instance.detections[0].timestamp)
+        
+        if earliest_timestamp != float('inf'):
+            # Set timeline to earliest detection
+            rr.set_time("timestamp", timestamp=earliest_timestamp / 1e9)
+            self._log_instances_batch(instances_3d, get_coco_class_color, get_coco_class_id)
+    
+    def _visualize_temporal_objects(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
+        """Visualize objects only during their detection lifetime."""
         # Collect all timestamps where objects are visible
         visibility_by_timestamp = {}  # timestamp -> list of visible instances
         
@@ -822,72 +853,83 @@ class ObjectInstanceTracker(AnalyticsPlugin):
             # Set timeline to this timestamp (convert nanoseconds to seconds)
             rr.set_time("timestamp", timestamp=timestamp / 1e9)
             
-            # Prepare batch data for all visible instances at this timestamp
-            centers_3d = []
-            half_sizes_3d = []
-            colors_3d = []
-            instance_metadata = {
-                'instance_id': [],
-                'class_name': [],
-                'confidence': [],
-                'gaze_quality': [],
-                'gaze_points': [],
-                'duration_ms': []
-            }
+            if visible_instances:
+                self._log_instances_batch(visible_instances, get_coco_class_color, get_coco_class_id)
+    
+    def _visualize_visit_based_objects(self, instances_3d: List[Dict], get_coco_class_color, get_coco_class_id, results: Dict) -> None:
+        """Visualize objects only during gaze visits."""
+        # This would require visit data from GazeObjectInteraction plugin
+        # For now, fall back to temporal visualization
+        self.logger.info("Visit-based visualization requested but not fully implemented, using temporal mode")
+        self._visualize_temporal_objects(instances_3d, get_coco_class_color, get_coco_class_id)
+    
+    def _log_instances_batch(self, instances: List[Dict], get_coco_class_color, get_coco_class_id) -> None:
+        """Helper method to log a batch of instances at the current timestamp."""
+        centers_3d = []
+        half_sizes_3d = []
+        colors_3d = []
+        instance_metadata = {
+            'instance_id': [],
+            'class_name': [],
+            'confidence': [],
+            'gaze_quality': [],
+            'gaze_points': [],
+            'duration_ms': []
+        }
+        
+        for item in instances:
+            instance_id = item['instance_id']
+            instance = item['instance']
+            class_name = item['class_name']
             
-            for item in visible_instances:
-                instance_id = item['instance_id']
-                instance = item['instance']
-                class_name = item['class_name']
-                
-                # Get class color
-                class_id = get_coco_class_id(class_name)
-                color = get_coco_class_color(class_id)
-                
-                # Adjust opacity based on gaze quality
-                if hasattr(instance, 'gaze_quality'):
-                    opacity = int(128 + instance.gaze_quality * 127)  # 0.5-1.0 range
-                else:
-                    opacity = 200
-                color_with_alpha = [color[0], color[1], color[2], opacity]
-                
-                centers_3d.append(instance.bbox_3d['center'])
-                half_sizes_3d.append(instance.bbox_3d['half_sizes'])
-                colors_3d.append(color_with_alpha)
-                
-                # Collect metadata
-                instance_metadata['instance_id'].append(instance_id)
-                instance_metadata['class_name'].append(class_name)
-                instance_metadata['confidence'].append(instance.avg_confidence)
-                instance_metadata['gaze_quality'].append(getattr(instance, 'gaze_quality', 0.0))
-                instance_metadata['gaze_points'].append(getattr(instance, 'gaze_point_count', 0))
-                instance_metadata['duration_ms'].append(instance.duration_ms)
+            # Get class color
+            class_id = get_coco_class_id(class_name)
+            color = get_coco_class_color(class_id)
             
-            # Log all visible instances at this timestamp
-            if centers_3d:  # Only log if there are instances to show
-                rr.log(
-                    "/world/objects/tracked_instances",
-                    rr.Boxes3D(
-                        centers=centers_3d,
-                        half_sizes=half_sizes_3d,
-                        colors=colors_3d,
-                        fill_mode="DenseWireframe"
-                    ),
-                    rr.AnyValues(**instance_metadata),
-                    static=False
-                )
-                
-                # Log consolidated centroids for easier visualization
-                rr.log(
-                    "/world/objects/tracked_centroids",
-                    rr.Points3D(
-                        positions=centers_3d,
-                        colors=[color[:3] for color in colors_3d],  # Remove alpha for points
-                        radii=0.02
-                    ),
-                    rr.AnyValues(**instance_metadata),
-                    static=False
-                )
+            # Adjust opacity based on gaze quality
+            if hasattr(instance, 'gaze_quality'):
+                opacity = int(128 + instance.gaze_quality * 127)  # 0.5-1.0 range
+            else:
+                opacity = 200
+            color_with_alpha = [color[0], color[1], color[2], opacity]
+            
+            centers_3d.append(instance.bbox_3d['center'])
+            half_sizes_3d.append(instance.bbox_3d['half_sizes'])
+            colors_3d.append(color_with_alpha)
+            
+            # Collect metadata
+            instance_metadata['instance_id'].append(instance_id)
+            instance_metadata['class_name'].append(class_name)
+            instance_metadata['confidence'].append(instance.avg_confidence)
+            instance_metadata['gaze_quality'].append(getattr(instance, 'gaze_quality', 0.0))
+            instance_metadata['gaze_points'].append(getattr(instance, 'gaze_point_count', 0))
+            instance_metadata['duration_ms'].append(instance.duration_ms)
+        
+        # Log all instances in batch
+        if centers_3d:  # Only log if there are instances to show
+            rr.log(
+                "/world/objects/tracked_instances",
+                rr.Boxes3D(
+                    centers=centers_3d,
+                    half_sizes=half_sizes_3d,
+                    colors=colors_3d,
+                    fill_mode="DenseWireframe"
+                ),
+                rr.AnyValues(**instance_metadata),
+                static=False
+            )
+            
+            # Log consolidated centroids for easier visualization
+            rr.log(
+                "/world/objects/tracked_centroids",
+                rr.Points3D(
+                    positions=centers_3d,
+                    colors=[color[:3] for color in colors_3d],  # Remove alpha for points
+                    radii=0.02
+                ),
+                rr.AnyValues(**instance_metadata),
+                static=False
+            )
     
     def _calculate_3d_bounding_boxes(self, session: SessionData, deps: Dict) -> None:
         """Calculate 3D bounding boxes for well-attended instances.
